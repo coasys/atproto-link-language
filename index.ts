@@ -118,24 +118,29 @@ const language = defineLanguage({
         const appPassword = AT_APP_PASSWORD !== "<to-be-filled>" ? AT_APP_PASSWORD : settings.auth.appPassword;
         if (appPassword && AT_PDS_URL !== "<to-be-filled>") {
             const handle = AT_HANDLE !== "<to-be-filled>" ? AT_HANDLE : AT_DID;
-            const auth = await authenticate(AT_PDS_URL, handle, appPassword);
-            if (auth) {
-                console.log(`[atproto-link-language] authenticated as ${auth.did}`);
-                // Initial sync if no cursor exists
-                if (!getStorage().get("at:sync:cursor")) {
-                    const diff = await initialSync({
-                        pdsUrl: AT_PDS_URL,
-                        accessJwt: auth.accessJwt,
-                        repo: auth.did,
-                        collection: collectionNsid(),
-                        neighbourhoodUrl: neighbourhoodUrl(),
-                    });
-                    if (diff.additions.length > 0) {
-                        emitPerspectiveDiff(diff);
+            console.log(`[atproto-link-language] attempting auth: handle=${handle}, pds=${AT_PDS_URL}`);
+            try {
+                const auth = await authenticate(AT_PDS_URL, handle, appPassword);
+                if (auth) {
+                    console.log(`[atproto-link-language] authenticated as ${auth.did}`);
+                    // Initial sync if no cursor exists
+                    if (!getStorage().get("at:sync:cursor")) {
+                        const diff = await initialSync({
+                            pdsUrl: AT_PDS_URL,
+                            accessJwt: auth.accessJwt,
+                            repo: auth.did,
+                            collection: collectionNsid(),
+                            neighbourhoodUrl: neighbourhoodUrl(),
+                        });
+                        if (diff.additions.length > 0) {
+                            emitPerspectiveDiff(diff);
+                        }
                     }
+                } else {
+                    console.error("[atproto-link-language] authentication failed — no session returned");
                 }
-            } else {
-                console.error("[atproto-link-language] authentication failed");
+            } catch (authErr: unknown) {
+                console.error(`[atproto-link-language] auth error: ${authErr instanceof Error ? authErr.message : String(authErr)}`);
             }
         }
     },
