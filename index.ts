@@ -62,6 +62,9 @@ const AT_HANDLE = "<to-be-filled>";
 const AT_COLLECTION_NSID = "<to-be-filled>";
 
 //!@ad4m-template-variable
+const AT_APP_PASSWORD = "<to-be-filled>";
+
+//!@ad4m-template-variable
 const NEIGHBOURHOOD_META = "<to-be-filled>";
 
 // ---------------------------------------------------------------------------
@@ -112,9 +115,10 @@ const language = defineLanguage({
         console.log(`[atproto-link-language] rendering: ${settings.rendering.strategy}`);
 
         // Authenticate to PDS if we have credentials
-        if (settings.auth.appPassword && AT_PDS_URL !== "<to-be-filled>") {
+        const appPassword = AT_APP_PASSWORD !== "<to-be-filled>" ? AT_APP_PASSWORD : settings.auth.appPassword;
+        if (appPassword && AT_PDS_URL !== "<to-be-filled>") {
             const handle = AT_HANDLE !== "<to-be-filled>" ? AT_HANDLE : AT_DID;
-            const auth = await authenticate(AT_PDS_URL, handle, settings.auth.appPassword);
+            const auth = await authenticate(AT_PDS_URL, handle, appPassword);
             if (auth) {
                 console.log(`[atproto-link-language] authenticated as ${auth.did}`);
                 // Initial sync if no cursor exists
