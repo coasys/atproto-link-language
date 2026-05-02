@@ -1,0 +1,25 @@
+{
+  "lexicon": 1,
+  "id": "ad4m.link.neighbourhood",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "literal:self",
+      "record": {
+        "type": "object",
+        "required": ["name", "description"],
+        "properties": {
+          "name": { "type": "string", "maxLength": 256 },
+          "description": { "type": "string", "maxLength": 2048 },
+          "neighbourhoodUrl": { "type": "string", "maxLength": 1024 },
+          "linkLanguageHash": { "type": "string", "maxLength": 256 },
+          "sdnaPatterns": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "SDNA predicate patterns this neighbourhood uses"
+          }
+        }
+      }
+    }
+  }
+}

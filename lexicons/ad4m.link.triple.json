@@ -1,0 +1,55 @@
+{
+  "lexicon": 1,
+  "id": "ad4m.link.triple",
+  "revision": 1,
+  "description": "An AD4M link — a signed semantic triple with author and timestamp.",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["source", "predicate", "target", "author", "timestamp"],
+        "properties": {
+          "source": {
+            "type": "string",
+            "maxLength": 4096,
+            "description": "Source URI of the link triple"
+          },
+          "predicate": {
+            "type": "string",
+            "maxLength": 1024,
+            "description": "Predicate URI of the link triple"
+          },
+          "target": {
+            "type": "string",
+            "maxLength": 4096,
+            "description": "Target URI of the link triple"
+          },
+          "author": {
+            "type": "string",
+            "maxLength": 512,
+            "description": "DID of the link author"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "datetime",
+            "description": "ISO-8601 timestamp of link creation"
+          },
+          "proof": {
+            "type": "ref",
+            "ref": "#proof"
+          }
+        }
+      }
+    },
+    "proof": {
+      "type": "object",
+      "description": "AD4M LinkExpression proof (signature + key)",
+      "properties": {
+        "signature": { "type": "string", "maxLength": 512 },
+        "key": { "type": "string", "maxLength": 512 }
+      }
+    }
+  }
+}

@@ -1,4 +1,7 @@
 node_modules/
 build/
-deno.lock
+lib/
 *.js.map
+*.d.ts.map
+.DS_Store
+pnpm-lock.yaml
