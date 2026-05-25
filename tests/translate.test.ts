@@ -23,7 +23,7 @@ import {
     linkContentKey,
     isTripleRecord,
     isBlueskyPost,
-} from "../src/translate.pure.js";
+} from "../src/translate.js";
 
 import type {
     LinkExpression,

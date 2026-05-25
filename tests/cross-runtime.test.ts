@@ -21,24 +21,21 @@ import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
 // Adapter interfaces
-import type { StorageAdapter } from "../src/storage-interface.js";
-import { initStorage, getStorage } from "../src/storage-interface.js";
-import type { Transport, TransportResponse } from "../src/transport.js";
-import { initTransport } from "../src/transport.js";
-import type { SigningAdapter } from "../src/signing-interface.js";
-import { initSigning } from "../src/signing-interface.js";
-import type { RuntimeAdapter } from "../src/runtime-interface.js";
-import { initRuntime } from "../src/runtime-interface.js";
+import type { StorageAdapter } from "../src/adapters.js";
+import { initStorage, getStorage } from "../src/adapters.js";
+import type { Transport, TransportResponse } from "../src/adapters.js";
+import { initTransport } from "../src/adapters.js";
+import type { SigningAdapter } from "../src/adapters.js";
+import { initSigning } from "../src/adapters.js";
+import type { RuntimeAdapter } from "../src/adapters.js";
+import { initRuntime } from "../src/adapters.js";
 
 // Production modules under test
 import * as store from "../src/store.js";
-import { linkToTripleRecord, tripleRecordToLink, diffToWriteOps, recordToLink, linkContentKey } from "../src/translate.pure.js";
-import { translateDiffToWrites } from "../src/translate.js";
+import { linkToTripleRecord, tripleRecordToLink, diffToWriteOps, recordToLink, linkContentKey, translateDiffToWrites, shouldFederate, linkOriginKey, linkContentHash, isDuplicate, detectPattern, patternToBlueskyType } from "../src/translate.js";
 import { syncFromPDS, getCursor, setCursor, getSyncStatus } from "../src/sync.js";
-import { shouldFederate, linkOriginKey, linkContentHash, isDuplicate } from "../src/dual-language.js";
-import { detectPattern, patternToBlueskyType } from "../src/sdna.js";
 import { parseSettings, DEFAULT_SETTINGS } from "../src/settings.js";
-import { generateFacets, extractLinks, extractMentions, facetsToLinkPredicates } from "../src/rendering.pure.js";
+import { generateFacets, extractLinks, extractMentions, facetsToLinkPredicates } from "../src/rendering.js";
 import { validateTripleRecord, validateNeighbourhoodRecord, TRIPLE_COLLECTION } from "../src/lexicon.js";
 import { parseJwtExp, isJwtExpired } from "../src/auth.js";
 import {
@@ -50,7 +47,7 @@ import {
     didFromUri,
     parseSessionResponse,
     parseListRecordsResponse,
-} from "../src/xrpc.pure.js";
+} from "../src/xrpc.js";
 
 import type { LinkExpression, PerspectiveDiff, Ad4mLinkTriple } from "../src/types.js";
 

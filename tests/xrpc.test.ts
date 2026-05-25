@@ -27,7 +27,7 @@ import {
     collectionFromUri,
     buildAtUri,
     didFromUri,
-} from "../src/xrpc.pure.js";
+} from "../src/xrpc.js";
 
 // ---------------------------------------------------------------------------
 // TID generation

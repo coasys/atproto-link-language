@@ -23,9 +23,8 @@ import {
 import type { PerspectiveDiff, LinkExpression } from "./src/types.js";
 import { parseSettings } from "./src/settings.js";
 import type { ATProtoSettings } from "./src/settings.js";
-import { translateDiffToWrites, linkContentKey } from "./src/translate.js";
-import { shouldFederate, linkOriginKey, linkContentHash } from "./src/dual-language.js";
-import type { LinkOrigin } from "./src/dual-language.js";
+import { translateDiffToWrites, linkContentKey, shouldFederate, linkOriginKey, linkContentHash } from "./src/translate.js";
+import type { LinkOrigin } from "./src/translate.js";
 import * as store from "./src/store.js";
 import * as xrpc from "./src/xrpc.js";
 import { authenticate, getAccessToken, getStoredDid } from "./src/auth.js";
@@ -33,14 +32,8 @@ import { syncFromPDS, initialSync } from "./src/sync.js";
 import { TRIPLE_COLLECTION } from "./src/lexicon.js";
 
 // Adapter imports
-import { initTransport } from "./src/transport.js";
-import { DenoTransport } from "./src/transport-deno.js";
-import { initStorage, getStorage } from "./src/storage-interface.js";
-import { DenoStorageAdapter } from "./src/storage-deno.js";
-import { initSigning } from "./src/signing-interface.js";
-import { DenoSigningAdapter } from "./src/signing-deno.js";
-import { initRuntime } from "./src/runtime-interface.js";
-import { DenoRuntime } from "./src/runtime-deno.js";
+import { initTransport, initStorage, getStorage, initSigning, initRuntime } from "./src/adapters.js";
+import { DenoTransport, DenoStorageAdapter, DenoSigningAdapter, DenoRuntime } from "./src/adapters-deno.js";
 
 // ---------------------------------------------------------------------------
 // Template Variables (per Spec §9)
@@ -357,7 +350,7 @@ export async function handleSignal(signalData: string): Promise<void> {
             // A new record notification from the executor
             const record = s.record as { uri: string; cid: string; value: Record<string, unknown> } | undefined;
             if (record) {
-                const { recordToLink } = await import("./src/translate.pure.js");
+                const { recordToLink } = await import("./src/translate.js");
                 const uriParts = record.uri.replace("at://", "").split("/");
                 const authorDid = uriParts[0] || "";
                 const link = recordToLink(record.value, authorDid, record.uri, neighbourhoodUrl());

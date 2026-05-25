@@ -13,7 +13,7 @@ import {
     isShare,
     isFollow,
     patternToBlueskyType,
-} from "../src/sdna.js";
+} from "../src/translate.js";
 
 import type { LinkExpression } from "../src/types.js";
 

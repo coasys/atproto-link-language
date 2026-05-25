@@ -8,12 +8,10 @@
  */
 
 import type { PerspectiveDiff, LinkExpression } from "./types.js";
-import { getStorage } from "./storage-interface.js";
-import { getRuntime } from "./runtime-interface.js";
+import { getStorage, getRuntime } from "./adapters.js";
 import * as xrpc from "./xrpc.js";
 import * as store from "./store.js";
-import { recordToLink, linkContentKey } from "./translate.pure.js";
-import { isDuplicate, linkContentHash, linkOriginKey } from "./dual-language.js";
+import { recordToLink, linkContentKey, isDuplicate, linkContentHash, linkOriginKey } from "./translate.js";
 
 // ---------------------------------------------------------------------------
 // Cursor management

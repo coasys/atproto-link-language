@@ -16,7 +16,7 @@ import {
     extractMentions,
     extractHashtags,
     facetsToLinkPredicates,
-} from "../src/rendering.pure.js";
+} from "../src/rendering.js";
 
 // ---------------------------------------------------------------------------
 // generateFacets

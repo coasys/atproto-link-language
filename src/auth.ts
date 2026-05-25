@@ -7,7 +7,7 @@
  * No ad4m:host imports — uses injected adapters.
  */
 
-import { getStorage } from "./storage-interface.js";
+import { getStorage } from "./adapters.js";
 import * as xrpc from "./xrpc.js";
 import type { ATSession } from "./types.js";
 

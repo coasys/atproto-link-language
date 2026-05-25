@@ -12,8 +12,8 @@ import {
     shouldFederate,
     isPredicateExcluded,
     shouldFederateLink,
-} from "../src/dual-language.js";
-import type { LinkOrigin } from "../src/dual-language.js";
+} from "../src/translate.js";
+import type { LinkOrigin } from "../src/translate.js";
 import type { LinkExpression } from "../src/types.js";
 
 // ---------------------------------------------------------------------------
