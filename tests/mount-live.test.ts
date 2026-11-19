@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 
 import { parseLossless, stringifyLossless } from "../src/mount/lossless-json.js";
+import { secretHits } from "./mount-secret-scan.js";
 
 const LIVE = process.env.MOUNT_LIVE === "1";
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -432,15 +433,7 @@ describe("mounted reader — live acceptance", { skip: !LIVE && "set MOUNT_LIVE=
         // credentials: neither account password nor any session token
         // appears anywhere in the executor's data dir or log
         const secrets = [...env.accounts.map((a) => a.password), ...tokens.values()];
-        const hits: string[] = [];
-        for (const s of secrets) {
-            try {
-                const out = execFileSync("grep", ["-rlaF", s, join(RUN, "executor"), join(RUN, "executor.log")], { encoding: "utf8" });
-                hits.push(...out.trim().split("\n").filter(Boolean));
-            } catch {
-                // grep exits 1 on no match
-            }
-        }
+        const hits = secretHits(secrets, [join(RUN, "executor"), join(RUN, "executor.log")]);
         assert.deepEqual(hits, [], "credentials leaked into executor state");
         record("restart_pds_down", { ...r, credentialHits: hits, secretsChecked: secrets.length });
     });
