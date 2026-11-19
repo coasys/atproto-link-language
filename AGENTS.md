@@ -140,10 +140,13 @@ two fresh accounts) and an executor on a temp data dir, and stops both.
 
 ### Explicit publication (slice 2, `spike/mounted-reader-s2`)
 
-The one write: `ATPost`'s constructor is an acorn a2 `call` action to
-`<lang>://class/ATPost` `publish`, so `perspective.createSubject("ATPost",
-{text, atAuthor, publicationKey})` creates an `app.bsky.feed.post` through
-`com.atproto.repo.createRecord`. Refresh, snapshot, status and record
+The one write is the `publish` interaction on `<lang>://class/ATPost`.
+`ATPost`'s constructor is an acorn a2 `call` action to it, so
+`perspective.createSubject("ATPost", {text, atAuthor, publicationKey})`
+creates an `app.bsky.feed.post` through `com.atproto.repo.createRecord`;
+a client can also call `publish` directly with `expression.interact`. Both
+are explicit and pass the same checks; the constructor is not an
+authorization boundary. Refresh, snapshot, status and record
 addresses never write.
 
 - `src/mount/oauth.ts` — atproto OAuth: DID -> PDS -> protected-resource ->
@@ -165,10 +168,19 @@ addresses never write.
 - The ledger lives in files `publish-ledger.<agent did>.<key>.json` in the
   language storage dir, written ONLY through the host's
   `writeStorageFileAtomic` (temp + fsync + rename + dir fsync, throws).
-  That host function is not in acorn a9 `c9d4a8de1`: it is on the local
-  ad4m branch `atproto-s2/atomic-storage-write` (`b4ba0550d`). Without it
-  publishing is refused. Never move the ledger back to the KV (best effort,
-  non-atomic).
+  A lock file `publish-ledger.<agent did>.lock`, created with the host's
+  `createStorageFileExclusive` (O_EXCL) and removed with
+  `removeStorageFile`, admits one writer at a time across processes sharing
+  the storage dir (src/mount/ledger-lock.ts; stale after 5 min, broken
+  under a takeover lock). None of these host functions is in acorn a9
+  `c9d4a8de1`: they are on the local ad4m branch
+  `atproto-s2/atomic-storage-write` (`9d246bce2`; Windows skips the
+  directory fsync). Without them publishing is refused. Never move the
+  ledger back to the KV (best effort, non-atomic), and never write it
+  outside the lock.
+- Errors that cross the publication boundary are `<CODE>: <fixed
+  sentence>`: never a server's text, a body excerpt, a URL or an inner
+  error's message (round 3).
 - Each publication has a read-back state (`confirmed` / `deleted`); the
   snapshot serves it from the ledger until then, unless its account is
   inactive. The reader's `vet` hook refuses a read that omits an existing

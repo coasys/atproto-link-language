@@ -711,6 +711,17 @@ describe("round 3 item 2: one writer at a time per ledger, across processes", ()
     });
 });
 
+describe("round 3 item 3: publish is described as the interaction it is", () => {
+    it("status names the publish interaction, reachable through the constructor or directly, and claims no constructor-only path", async () => {
+        const { svc } = service(writeNet());
+        const st = await svc.call("project", "status");
+        assert.match(st.writes, /publish interaction on <lang>:\/\/class\/ATPost/);
+        assert.match(st.writes, /constructor/);
+        assert.match(st.writes, /directly/);
+        assert.doesNotMatch(st.writes, /only:? the ATPost constructor|constructor-only/i);
+    });
+});
+
 describe("rule 4: read-back by a distinct account's reader", () => {
     it("bob's reader (another agent, no session) shows alice's new post with atAuthor = alice, and bob's follow of alice", async () => {
         const { net, svc } = await ready();

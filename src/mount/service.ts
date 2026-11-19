@@ -114,7 +114,7 @@ export class MountService {
             moderation: this.opts.appviewUrl ? "appview" : "unavailable",
             allowHttp: !!this.opts.allowHttp,
             lastReport: this.reader.lastReport,
-            writes: "explicit only: the ATPost constructor (com.atproto.repo.createRecord, app.bsky.feed.post), OAuth + DPoP",
+            writes: "explicit only: the publish interaction on <lang>://class/ATPost (createRecord, app.bsky.feed.post; OAuth + DPoP), invoked by the ATPost constructor or called directly; refresh, snapshot and record addresses never write",
             oauth: { clientId: CLIENT_ID, scope: OAUTH_SCOPE, authorizedAccounts: this.vault.accounts() },
             ...extra,
         };

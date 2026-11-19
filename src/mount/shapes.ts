@@ -3,9 +3,10 @@
  * `mountShapes()` -> `{version, shapes: [{name, shape}]}`; same JSON shape
  * the Acorn language emits).
  *
- * Slice 2: ATPost has one constructor, an acorn a2 `call` action to
- * `<lang>://class/ATPost` `publish` — explicit publication of a plain-text
- * post (publisher.ts). Nothing else writes: no destructor, setter or
+ * Slice 2: ATPost has one constructor, an acorn a2 `call` action to the
+ * `publish` interaction on `<lang>://class/ATPost` — explicit publication of
+ * a plain-text post (publisher.ts). The same interaction can be called
+ * directly; the shapes add no other write: no destructor, setter or
  * writable property on any class, so a model write to a mounted instance
  * (an annotation) never reaches the language or a PDS.
  *
@@ -82,7 +83,7 @@ function propShape(p: Prop): Record<string, unknown> {
     return shape;
 }
 
-/** The one write: ATPost's constructor calls `publish` on the language's
+/** ATPost's constructor calls the `publish` interaction on the language's
  *  class address (a constructor has no instance for `source: "this"`). */
 function constructorOf(name: ClassName, languageAddress: string) {
     if (name !== "ATPost") return [];

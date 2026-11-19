@@ -1,12 +1,17 @@
 /**
  * Explicit publication of a plain-text `app.bsky.feed.post` (slice 2).
  *
- * Only the ATPost constructor (`<lang>://class/ATPost` `publish`) calls
- * `publish`. Nothing else in the language writes to a PDS: refresh,
- * snapshot, status and every record address are read-only.
+ * `publish` is an interaction on `<lang>://class/ATPost`. The ATPost
+ * constructor (an acorn a2 `call` action) invokes it, and a client may also
+ * call it directly through `expression.interact`; both are explicit
+ * requests and both pass the same checks (allowlist, session, ledger).
+ * Constructor provenance is not an authorization boundary. Nothing else in
+ * the language writes to a PDS: refresh, snapshot, status and every record
+ * address are read-only.
  *
  * Durable publication key. Each request carries `publicationKey`; the
- * ledger in host storage (`publish/v1/<agent>/<key>`) records the account,
+ * ledger (files in the language storage dir, written atomically under a
+ * cross-process lock; see `ledgerFiles`, ledger-lock.ts) records the account,
  * the text, an rkey (a TID chosen BEFORE the first send), and the outcome.
  *  - published: the same key answers from the ledger, with no request;
  *  - the same key with another account or text is refused;

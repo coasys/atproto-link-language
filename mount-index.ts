@@ -228,7 +228,7 @@ const language = defineLanguage({
         // Bounded polling: the executor resyncs every 15 s; the PDS is read
         // at most every POLL_MS. A failed read serves the last complete
         // snapshot (state.ts), so the sweep never removes on a failure.
-        // Never writes: publication is only the ATPost constructor's call.
+        // Never writes: publication is only the explicit publish interaction.
         async snapshot() {
             const svc = theService();
             if (!svc.reader.lastReport || Date.now() - lastReadAt >= pollMs()) await refreshNow();
