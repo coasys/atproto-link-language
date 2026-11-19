@@ -28,6 +28,7 @@ const PLC_PORT = Number(process.env.PLC_PORT ?? 47101);
 const PDS_PORT = Number(process.env.PDS_PORT ?? 47102);
 const AD4M_PORT = Number(process.env.AD4M_PORT ?? 47110);
 const RUN = process.env.LIVE_RUN_DIR ?? (LIVE ? mkdtempSync(join(tmpdir(), "atproto-s1-live-")) : "");
+if (LIVE && RUN) mkdirSync(RUN, { recursive: true });
 const EVIDENCE = process.env.LIVE_EVIDENCE ?? join(RUN, "evidence.json");
 const PASS = "live-test-passphrase";
 const POST = "app.bsky.feed.post";
