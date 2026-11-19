@@ -74,9 +74,22 @@ export interface CallDelta {
     removed: string[];
 }
 
+/** The language's storage directory through the host's file I/O. The
+ *  ledger lives only here, never in the best-effort KV (round 2, item 2):
+ *  `writeAtomic` is the host's `writeStorageFileAtomic` (temp file, fsync,
+ *  rename, directory fsync; throws on any failure). `read` returns null
+ *  only for a missing file and throws on any other failure. */
+export interface DurableFiles {
+    atomic(): boolean;
+    read(name: string): string | null;
+    writeAtomic(name: string, content: string): void;
+}
+
 export interface PublisherOptions extends ReaderConfig {
     transport: Transport;
+    /** the KV: read only, to adopt round-1 ledger entries */
     storage: StorageLike;
+    files?: DurableFiles;
     oauth: OAuthClient;
     /** the executor agent the language runs as (ledger namespace) */
     agentDid: () => string;
@@ -88,9 +101,15 @@ export interface PublisherOptions extends ReaderConfig {
 }
 
 const KEY = /^[A-Za-z0-9._:~-]{8,128}$/;
+const NO_ATOMIC = "this executor has no atomic durable storage write (host writeStorageFileAtomic): publishing is disabled; nothing was sent";
 const DID = /^did:(plc:[a-z2-7]{24}|web:[a-zA-Z0-9.%-]+)$/;
 const MAX_GRAPHEMES = 300;
 const MAX_BYTES = 3000;
+
+export const ledgerFiles = {
+    entry: (agent: string, key: string) => `publish-ledger.${agent}.${key}.json`,
+    index: (agent: string) => `publish-ledger.${agent}.index.json`,
+};
 
 export const ledgerKeys = {
     entry: (agent: string, key: string) => `publish/v1/${agent}/${key}`,
@@ -111,39 +130,101 @@ export class Publisher {
         this.now = opts.now ?? (() => new Date());
     }
 
-    // ---- ledger ----
+    // ---- ledger (durable files) ----
 
+    private files(): DurableFiles | null {
+        return this.opts.files && this.opts.files.atomic() ? this.opts.files : null;
+    }
+
+    /** The ledger entry for `key`: null when there is none. Throws when one
+     *  exists but cannot be read — never treated as absent, which would
+     *  mint a second rkey. A round-1 entry in the KV is returned for
+     *  adoption (the next save moves it to the file ledger). */
     ledgerEntry(key: string): LedgerEntry | null {
         if (typeof key !== "string" || !KEY.test(key)) return null;
-        const raw = this.opts.storage.get(ledgerKeys.entry(this.opts.agentDid(), key));
-        if (!raw) return null;
+        const agent = this.opts.agentDid();
+        let raw: string | null = null;
+        if (this.opts.files) {
+            try {
+                raw = this.opts.files.read(ledgerFiles.entry(agent, key));
+            } catch (err) {
+                throw new PublishError(`publication ${key}: the ledger entry is unreadable (${(err as Error).message}); nothing was sent`);
+            }
+        }
+        if (raw === null) raw = this.opts.storage.get(ledgerKeys.entry(agent, key)) ?? null;
+        if (raw === null) return null;
+        let e: any;
         try {
-            const e = JSON.parse(raw);
-            return e && e.v === 1 && e.key === key ? (e as LedgerEntry) : null;
+            e = JSON.parse(raw);
         } catch {
-            return null;
+            e = null;
+        }
+        if (!e || e.v !== 1 || e.key !== key || typeof e.rkey !== "string" || !isTid(e.rkey) || (e.state !== "pending" && e.state !== "published")) {
+            throw new PublishError(`publication ${key}: the ledger entry is unreadable; nothing was sent`);
+        }
+        return e as LedgerEntry;
+    }
+
+    /** Write `e` durably and atomically, or throw: nothing may be sent on
+     *  the strength of an unacknowledged write. */
+    private save(e: LedgerEntry): void {
+        const files = this.files();
+        if (!files) throw new PublishError(`publication ${e.key}: ${NO_ATOMIC}`);
+        const agent = this.opts.agentDid();
+        try {
+            const keys = this.indexKeys();
+            // index first: a key listed without an entry file is ignored
+            if (!keys.includes(e.key)) files.writeAtomic(ledgerFiles.index(agent), JSON.stringify([...keys, e.key]));
+            files.writeAtomic(ledgerFiles.entry(agent, e.key), JSON.stringify(e));
+        } catch (err) {
+            throw new PublishError(`publication ${e.key}: ledger write failed (${(err as Error).message}); nothing was sent after it`);
+        }
+        try {
+            this.opts.storage.delete(ledgerKeys.entry(agent, e.key)); // adopted round-1 entry, if any
+        } catch {
+            // the file entry takes precedence
         }
     }
 
-    private save(e: LedgerEntry): void {
-        const agent = this.opts.agentDid();
-        this.opts.storage.put(ledgerKeys.entry(agent, e.key), JSON.stringify(e));
-        const keys = this.indexKeys();
-        if (!keys.includes(e.key)) this.opts.storage.put(ledgerKeys.index(agent), JSON.stringify([...keys, e.key]));
+    /** Record a known outcome. If that write fails the record exists on
+     *  the PDS but the ledger still says pending: the next request lists
+     *  and finds it, so this is "uncertain", never a reason to resend. */
+    private saveOutcome(e: LedgerEntry): void {
+        try {
+            this.save(e);
+        } catch (err) {
+            throw new PublishError(`publication ${e.key}: published as ${e.uri}, but ${(err as Error).message.replace(/^publication \S+: /, "")} — retry with the same publicationKey; it lists first`, true);
+        }
     }
 
     private indexKeys(): string[] {
+        const raw = this.opts.files?.read(ledgerFiles.index(this.opts.agentDid())) ?? null;
+        let v: unknown = [];
         try {
-            const v = JSON.parse(this.opts.storage.get(ledgerKeys.index(this.opts.agentDid())) ?? "[]");
-            return Array.isArray(v) ? v.filter((k): k is string => typeof k === "string") : [];
+            v = raw === null ? [] : JSON.parse(raw);
         } catch {
-            return [];
+            v = [];
         }
+        const legacy = (() => {
+            try {
+                const l = JSON.parse(this.opts.storage.get(ledgerKeys.index(this.opts.agentDid())) ?? "[]");
+                return Array.isArray(l) ? l : [];
+            } catch {
+                return [];
+            }
+        })();
+        return [...new Set([...(Array.isArray(v) ? v : []), ...legacy])].filter((k): k is string => typeof k === "string" && KEY.test(k));
     }
 
     /** Published ledger entries of the current executor user. */
     published(): LedgerEntry[] {
-        return this.indexKeys().map((k) => this.ledgerEntry(k)).filter((e): e is LedgerEntry => e?.state === "published");
+        return this.indexKeys().map((k) => {
+            try {
+                return this.ledgerEntry(k);
+            } catch {
+                return null; // unreadable: not served; publish refuses it
+            }
+        }).filter((e): e is LedgerEntry => e?.state === "published");
     }
 
     entryOf(e: LedgerEntry): MountEntry {
@@ -216,6 +297,7 @@ export class Publisher {
             throw new PublishError(`publicationKey ${key} is already used for a different post`);
         }
         if (e?.state === "published") return this.deltaOf(e);
+        if (!this.files()) throw new PublishError(`publication ${key}: ${NO_ATOMIC}`);
         if (!this.opts.oauth.hasSession(account)) {
             throw new PublishError(`${account} is not authorized for this executor user: run authorize first`);
         }
@@ -244,7 +326,7 @@ export class Publisher {
             if (found) {
                 e = { ...e, state: "published", uri: found.uri, cid: found.cid, commitRev: found.rev };
                 delete e.lastError;
-                this.save(e);
+                this.saveOutcome(e);
                 return this.deltaOf(e);
             }
         }
@@ -273,7 +355,7 @@ export class Publisher {
                 if (out?.uri === uri && typeof out?.cid === "string") {
                     e = { ...e, state: "published", uri, cid: out.cid, ...(isTid(out?.commit?.rev) ? { commitRev: out.commit.rev } : {}) };
                     delete e.lastError;
-                    this.save(e);
+                    this.saveOutcome(e);
                     return this.deltaOf(e);
                 }
                 reason = `createRecord answered ${r.status} without the expected uri/cid`;
@@ -285,8 +367,11 @@ export class Publisher {
         } catch (err) {
             reason = (err as Error).message;
         }
-        e = { ...e, lastError: reason };
-        this.save(e);
+        try {
+            this.save({ ...e, lastError: reason });
+        } catch {
+            // the attempt is already on record; the diagnostic is optional
+        }
         throw new PublishError(
             `publication ${key}: ${uncertain ? "outcome uncertain" : "refused"} (${reason}); ` +
             `nothing is sent again before the account's posts are listed — retry with the same publicationKey`,

@@ -30,6 +30,7 @@ function service(net: FakeWriteNet, opts: Omit<Partial<ServiceOptions>, "agent">
         appviewUrl: "",
         transport: net,
         storage,
+        files: (storage as MemStorage).disk.api(),
         crypto: testCrypto,
         agent: { did: () => agent.did, openSealed: (b) => agent.openSealed(b) },
         timeoutMs: 200,

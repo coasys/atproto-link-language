@@ -12,7 +12,8 @@ import { mountShapes } from "../src/mount/shapes.js";
 import { isTid } from "../src/mount/reader.js";
 import { newTid } from "../src/mount/bytes.js";
 import { CAROL, FOLLOW, PLC, followOf, plainPost } from "./mount-fixtures.js";
-import { ALICE, BOB, FakeAgent, MemStorage, POST, SCOPE, testCrypto, writeNet, type FakeWriteNet } from "./mount-write-fixtures.js";
+import { ALICE, BOB, CrashError, FakeAgent, MemStorage, POST, SCOPE, testCrypto, writeNet, type FakeWriteNet } from "./mount-write-fixtures.js";
+import { ledgerFiles } from "../src/mount/publisher.js";
 
 const LANG = "QmzTestLanguage";
 
@@ -26,6 +27,7 @@ function service(net: FakeWriteNet, opts: Omit<Partial<ServiceOptions>, "agent">
         appviewUrl: "",
         transport: net,
         storage,
+        files: (storage as MemStorage).disk.api(),
         crypto: testCrypto,
         agent: { did: () => agent.did, openSealed: (b) => agent.openSealed(b) },
         timeoutMs: 200,
@@ -301,6 +303,77 @@ describe("rule 3: a durable publication key; an uncertain create is listed befor
         const r2 = await svc.refresh();
         assert.ok(r2.delta.removed.includes(delta.address), "a later complete read without it removes it");
         assert.equal(inSnap(), undefined);
+    });
+});
+
+describe("round 2 item 2: the ledger is written atomically and acknowledged before any send", () => {
+    const P = { text: TEXT, atAuthor: ALICE, publicationKey: KEY };
+    const creates = (net: FakeWriteNet, mark = 0) => net.requestsLog.slice(mark).filter((r) => r.method === "POST" && r.url.includes("createRecord"));
+
+    it("a host without an atomic durable write cannot publish; an already published key still answers", async () => {
+        const { net, svc, storage } = await ready();
+        const first = await svc.call("class/ATPost", "publish", P);
+        storage.disk.atomic = false;
+        assert.deepEqual(await svc.call("class/ATPost", "publish", P), first, "the published key answers from the ledger");
+        const mark = net.requestsLog.length;
+        await assert.rejects(svc.call("class/ATPost", "publish", { ...P, publicationKey: "other-key-0001" }), /atomic/);
+        assert.deepEqual(net.requestsLog.slice(mark).map((r) => r.url), [], "no request at all");
+    });
+
+    it("the ledger is not kept in the best-effort KV", async () => {
+        const { svc, storage, agent } = await ready();
+        await svc.call("class/ATPost", "publish", P);
+        assert.ok(![...storage.map.keys()].some((k) => k.startsWith("publish/")), "nothing under publish/ in the KV");
+        assert.ok(storage.disk.files.has(ledgerFiles.entry(agent.did, KEY)));
+    });
+
+    it("a failed ledger write (the pre-chosen rkey, attempt on record) blocks the send", async () => {
+        for (const when of ['"attempts":0', '"attempts":1']) {
+            const { net, svc, storage } = await ready();
+            storage.disk.failWrite = (_n, c) => c.includes(when);
+            const mark = net.requestsLog.length;
+            await assert.rejects(svc.call("class/ATPost", "publish", P), /ledger/, when);
+            assert.equal(creates(net, mark).length, 0, `${when}: no createRecord`);
+            assert.equal(net.postsWithText(ALICE, TEXT).length, 0);
+        }
+    });
+
+    it("a crash between the temp write and the rename keeps the old ledger; after a restart the same rkey is listed and nothing is posted twice", async () => {
+        const { net, svc, agent, storage } = await ready();
+        net.writeFaults.push({ kind: "commitThenHang" });
+        await assert.rejects(svc.call("class/ATPost", "publish", P), PublishError);
+        const before = storage.disk.files.get(ledgerFiles.entry(agent.did, KEY))!;
+        const rkey = JSON.parse(before).rkey;
+        // the retry finds the record and crashes while recording "published"
+        storage.disk.crashBeforeRename = (_n, c) => c.includes('"state":"published"');
+        await assert.rejects(svc.call("class/ATPost", "publish", P), (e: unknown) => e instanceof CrashError || /crashed/.test(String(e)));
+        assert.equal(storage.disk.files.get(ledgerFiles.entry(agent.did, KEY)), before, "the old entry is intact");
+        const { svc: restarted } = service(net, { agent, storage });
+        const mark = net.requestsLog.length;
+        const res = await restarted.call("class/ATPost", "publish", P);
+        assert.equal(res.address.split("/").pop(), rkey, "the same rkey");
+        assert.equal(creates(net, mark).length, 0, "listed, not re-sent");
+        assert.equal(net.postsWithText(ALICE, TEXT).length, 1);
+    });
+
+    it("an unreadable ledger entry fails closed: no new rkey, no request", async () => {
+        const { net, svc, agent, storage } = await ready();
+        storage.disk.files.set(ledgerFiles.entry(agent.did, KEY), '{"v":1,"key":"pub-key-0001","rk');
+        const mark = net.requestsLog.length;
+        await assert.rejects(svc.call("class/ATPost", "publish", P), /unreadable/);
+        assert.deepEqual(net.requestsLog.slice(mark).map((r) => r.url), []);
+    });
+
+    it("a round-1 KV ledger entry is adopted (same rkey), never re-minted", async () => {
+        const { net, svc, agent, storage } = await ready();
+        const rkey = "3n2oaaaaaaa22";
+        net.put(ALICE, POST, rkey, JSON.stringify({ $type: POST, text: TEXT, createdAt: "2026-11-19T20:00:00.000Z" }));
+        storage.put(`publish/v1/${agent.did}/${KEY}`, JSON.stringify({ v: 1, key: KEY, account: ALICE, text: TEXT, createdAt: "2026-11-19T20:00:00.000Z", rkey, state: "pending", attempts: 1 }));
+        const mark = net.requestsLog.length;
+        const res = await svc.call("class/ATPost", "publish", P);
+        assert.equal(res.address.split("/").pop(), rkey);
+        assert.equal(creates(net, mark).length, 0);
+        assert.equal(JSON.parse(storage.disk.files.get(ledgerFiles.entry(agent.did, KEY))!).state, "published");
     });
 });
 

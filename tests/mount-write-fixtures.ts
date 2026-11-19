@@ -108,10 +108,49 @@ export class FakeAgent {
     }
 }
 
+// ---- the language storage directory as the host's atomic write sees it -----
+
+export class CrashError extends Error {}
+
+/** Files change only by an atomic replace (temp + fsync + rename, as the
+ *  host's writeStorageFileAtomic). `failWrite` makes a write throw before
+ *  anything changes (disk full); `crashBeforeRename` leaves the temp file
+ *  and "kills the process" (throws CrashError): the target keeps its old
+ *  content. `atomic = false` is a host without the function. */
+export class FakeDisk {
+    files = new Map<string, string>();
+    temps: string[] = [];
+    atomic = true;
+    failWrite: ((name: string, content: string) => boolean) | null = null;
+    crashBeforeRename: ((name: string, content: string) => boolean) | null = null;
+    writes: Array<{ name: string; content: string }> = [];
+
+    api() {
+        return {
+            atomic: () => this.atomic,
+            read: (name: string) => this.files.get(name) ?? null,
+            writeAtomic: (name: string, content: string) => {
+                if (!this.atomic) throw new Error("writeStorageFileAtomic is not installed on this runtime");
+                if (this.failWrite?.(name, content)) throw new Error("No space left on device (os error 28)");
+                const tmp = `${name}.tmp-${this.temps.length}`;
+                this.temps.push(tmp);
+                if (this.crashBeforeRename?.(name, content)) {
+                    this.crashBeforeRename = null;
+                    throw new CrashError(`crashed before renaming ${tmp}`);
+                }
+                this.files.set(name, content);
+                this.writes.push({ name, content });
+            },
+        };
+    }
+}
+
 // ---- a recording, failable in-memory storage --------------------------------
 
 export class MemStorage {
     map = new Map<string, string>();
+    /** the language's storage directory (durable files), shared on restart */
+    disk = new FakeDisk();
     get(k: string): string | null {
         return this.map.get(k) ?? null;
     }

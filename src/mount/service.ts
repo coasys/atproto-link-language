@@ -18,7 +18,7 @@ import type { Transport } from "../adapters.js";
 import { DpopNonces } from "./dpop.js";
 import type { MountEntry } from "./mapping.js";
 import { CLIENT_ID, OAUTH_SCOPE, OAuthClient } from "./oauth.js";
-import { Publisher, type CallDelta } from "./publisher.js";
+import { Publisher, type CallDelta, type DurableFiles } from "./publisher.js";
 import { mountShapes } from "./shapes.js";
 import { MountedReader, diff, type RefreshReport } from "./state.js";
 import { CredentialVault, type AgentAccess, type StorageLike } from "./vault.js";
@@ -32,6 +32,9 @@ export interface ServiceOptions {
     /** OAuth and PDS writes; needs response headers (DPoP-Nonce). Defaults to `transport`. */
     writeTransport?: Transport;
     storage: StorageLike;
+    /** the language storage directory with the host's atomic write; without
+     *  it publishing is refused (the ledger must be durable) */
+    files?: DurableFiles;
     crypto: WebCrypto;
     agent: AgentAccess;
     languageAddress: () => string;
@@ -72,7 +75,7 @@ export class MountService {
             vault: this.vault, nonces: new DpopNonces(), now: opts.now,
         });
         this.publisher = new Publisher({
-            ...cfg, transport: writeTransport, storage: opts.storage, oauth: this.oauth, agentDid: () => opts.agent.did(),
+            ...cfg, transport: writeTransport, storage: opts.storage, files: opts.files, oauth: this.oauth, agentDid: () => opts.agent.did(),
             crypto: opts.crypto, accounts: this.reader.accounts, writeTimeoutMs: opts.writeTimeoutMs, now: opts.now,
         });
     }

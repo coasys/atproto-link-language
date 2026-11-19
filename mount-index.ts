@@ -43,10 +43,14 @@ import {
     agentDid,
     agentOpenSealed,
     languageAddress,
+    languageStorageDirectory,
+    readStorageFile,
 } from "@coasys/ad4m-ldk";
+import * as host from "ad4m:host";
 
 import type { Transport, TransportResponse } from "./src/adapters.js";
 import { MountService } from "./src/mount/service.js";
+import type { DurableFiles } from "./src/mount/publisher.js";
 import { allowHttpSetting } from "./src/mount/reader.js";
 
 declare const ACCOUNTS: string;
@@ -124,6 +128,33 @@ class HeaderTransport implements Transport {
     }
 }
 
+/** The publication ledger's storage: files in the language storage
+ *  directory, replaced only through the host's `writeStorageFileAtomic`
+ *  (temp + fsync + rename + directory fsync, throws on failure). Executors
+ *  without it (acorn a9 c9d4a8de1 as found) cannot publish: the KV's flush
+ *  is best effort and its file rewrite is not atomic. */
+const files: DurableFiles = {
+    atomic: () => typeof (host as any).writeStorageFileAtomic === "function" && !!storageDir(),
+    read: (name) => {
+        try {
+            return String(readStorageFile(`${storageDir()}/${name}`));
+        } catch (e) {
+            const err = e as Error;
+            if (err?.name === "NotFound" || /NotFound|No such file/.test(String(err?.message))) return null;
+            throw e;
+        }
+    },
+    writeAtomic: (name, content) => (host as any).writeStorageFileAtomic(`${storageDir()}/${name}`, content),
+};
+
+function storageDir(): string {
+    try {
+        return String(languageStorageDirectory() ?? "").replace(/\/+$/, "");
+    } catch {
+        return "";
+    }
+}
+
 const storage = {
     get: (k: string) => storageGet(k) ?? null,
     put: (k: string, v: string) => storagePut(k, v),
@@ -161,6 +192,7 @@ const language = defineLanguage({
             transport: new HostTransport(),
             writeTransport: new HeaderTransport(),
             storage,
+            files,
             crypto: globalThis.crypto,
             agent: { did: () => agentDid(), openSealed: (box) => agentOpenSealed(box) },
             languageAddress: () => languageAddress(),
