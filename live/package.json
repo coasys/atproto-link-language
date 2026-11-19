@@ -1,0 +1,10 @@
+{
+  "name": "atproto-mounted-reader-live",
+  "private": true,
+  "type": "module",
+  "description": "Live acceptance harness: in-process PDS + PLC (@atproto/dev-env) and an AD4M executor driver. Needs Node >= 22.",
+  "dependencies": {
+    "@atproto/dev-env": "0.7.15",
+    "ws": "8.18.3"
+  }
+}
