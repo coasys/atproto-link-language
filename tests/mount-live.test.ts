@@ -15,13 +15,14 @@ import assert from "node:assert/strict";
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { mkdtempSync, readFileSync, existsSync, mkdirSync, writeFileSync, openSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 
 import { parseLossless, stringifyLossless } from "../src/mount/lossless-json.js";
 
 const LIVE = process.env.MOUNT_LIVE === "1";
-const ROOT = resolve(import.meta.dirname, "..");
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const EXECUTOR = process.env.AD4M_EXECUTOR ?? "";
 const PLC_PORT = Number(process.env.PLC_PORT ?? 47101);
 const PDS_PORT = Number(process.env.PDS_PORT ?? 47102);
