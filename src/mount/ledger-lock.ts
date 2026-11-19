@@ -1,34 +1,42 @@
 /**
  * One writer at a time per publication ledger, across processes (round 3
- * #2). Two executors (or isolates) sharing a language storage directory
- * would otherwise both read a publicationKey as absent, choose rkeys from
- * independent clocks and post twice: an atomic rename is not a
+ * #2, simplified in round 4 after Lal's r3 review). Two executors (or
+ * isolates) sharing a language storage directory would otherwise both read
+ * a publicationKey as absent and post twice: an atomic rename is not a
  * compare-and-set.
  *
- * The lock is a file created with the host's createStorageFileExclusive
- * (O_EXCL): `{owner, at}`. It covers the whole critical section of a
- * publication — ledger read, rkey allocation, the pre-send save, the send
- * and the outcome save. The holder refreshes `at` (atomic overwrite) before
- * the network send and checks it still owns the lock before recording an
- * outcome.
+ * The lock is a file `{owner, at}` created with the host's
+ * createStorageFileExclusive, which publishes it atomically (temp file
+ * written and fsynced, then hard-linked; fails if the lock exists), so a
+ * lock is never seen half-written. It covers the whole critical section of
+ * a publication — ledger read, rkey allocation, the pre-send save, the send
+ * and the outcome save.
  *
- * A lock older than `staleMs` belongs to a writer that died (a publication
- * takes well under it: every request has a deadline). It is broken under a
- * second exclusive lock (`<lock>.takeover`), so two processes cannot both
- * break it and both win; a takeover lock older than TAKEOVER_STALE_MS is
- * itself removed. Residual window (documented): a holder that stalls longer
- * than `staleMs` can lose the lock between its ownership check and its next
- * write.
+ * There is NO age-based stealing, lease, takeover or refresh (round 4 #2):
+ * while a lock file exists, every other writer is refused at once with
+ * LedgerBusy and sends nothing. Only its holder removes it, and only when
+ * the file still names the holder. Content that cannot be read is held by
+ * someone else. Because no process ever removes a lock it does not hold,
+ * the holder's check-then-remove cannot race another writer.
+ *
+ * Manual recovery of a lock left by a writer that died (the process was
+ * killed or crashed while publishing):
+ *   1. stop every executor that uses this data directory and make sure none
+ *      is running (e.g. `pgrep -af "ad4m-executor run -a <data dir>"`
+ *      prints nothing);
+ *   2. delete `<data dir>/ad4m/languages/<language address>/
+ *      publish-ledger.<agent did>.lock` (the `.lock` file only — never a
+ *      `publish-ledger.*.json` file);
+ *   3. start the executor again. A publication the dead writer left pending
+ *      is resolved by its next request with the same publicationKey, which
+ *      reads the account's posts before any resend.
  */
 
 export interface LockFiles {
     read(name: string): string | null;
-    writeAtomic(name: string, content: string): void;
     createExclusive(name: string, content: string): void;
     remove(name: string): void;
 }
-
-const TAKEOVER_STALE_MS = 30_000;
 
 export class LedgerBusy extends Error {}
 
@@ -40,32 +48,26 @@ export class LedgerLock {
         private readonly name: string,
         private readonly owner: string,
         private readonly now: () => number,
-        private readonly staleMs = 300_000,
-        private readonly waitMs = 30_000,
-        private readonly pollMs = 50,
     ) {}
 
-    private content(): string {
-        return JSON.stringify({ owner: this.owner, at: this.now() });
-    }
-
-    private state(name: string): { owner: string; at: number } | null {
-        const raw = this.files.read(name);
+    /** The holder named by the lock file: null when there is none, "" when
+     *  it cannot be read (held by someone else). */
+    private holder(): string | null {
+        const raw = this.files.read(this.name);
         if (raw === null) return null;
         try {
             const j = JSON.parse(raw);
-            if (typeof j?.owner === "string" && j.owner && typeof j?.at === "number") return j;
+            if (typeof j?.owner === "string" && j.owner && typeof j?.at === "number") return j.owner;
         } catch {
-            // handled below
+            // unreadable
         }
-        // Unreadable or partial: possibly a lock another process is creating.
-        // Held by someone else — never stale, never ours (round 4 #1).
-        return { owner: "", at: Number.POSITIVE_INFINITY };
+        return "";
     }
 
-    private tryCreate(name: string): boolean {
+    /** Take the lock if nobody holds it; never waits, never steals. */
+    tryAcquire(): boolean {
         try {
-            this.files.createExclusive(name, this.content());
+            this.files.createExclusive(this.name, JSON.stringify({ owner: this.owner, at: this.now() }));
             return true;
         } catch (e) {
             if (isName(e, "AlreadyExists")) return false;
@@ -73,68 +75,16 @@ export class LedgerLock {
         }
     }
 
-    /** Break a stale lock, holding the takeover lock while doing it. */
-    private breakStale(): void {
-        const takeover = `${this.name}.takeover`;
-        if (!this.tryCreate(takeover)) {
-            const t = this.state(takeover);
-            if (t && this.now() - t.at > TAKEOVER_STALE_MS) {
-                try {
-                    this.files.remove(takeover);
-                } catch {
-                    // someone else did
-                }
-            }
-            return;
-        }
-        try {
-            const s = this.state(this.name);
-            if (s && this.now() - s.at > this.staleMs) {
-                try {
-                    this.files.remove(this.name);
-                } catch {
-                    // already gone
-                }
-            }
-        } finally {
-            try {
-                this.files.remove(takeover);
-            } catch {
-                // already gone
-            }
-        }
-    }
-
-    /** One attempt: take the lock, breaking it first if it is stale. */
-    tryAcquire(): boolean {
-        if (this.tryCreate(this.name)) return true;
-        const s = this.state(this.name);
-        if (s && s.owner !== this.owner && this.now() - s.at > this.staleMs) {
-            this.breakStale();
-            return this.tryCreate(this.name);
-        }
-        return false;
-    }
-
-    /** Take the lock, waiting up to `waitMs` for another writer. */
-    async acquire(): Promise<void> {
-        const until = Date.now() + this.waitMs;
-        for (;;) {
-            if (this.tryAcquire()) return;
-            if (Date.now() >= until) throw new LedgerBusy("ledger lock held by another writer");
-            await new Promise((r) => setTimeout(r, this.pollMs));
-        }
+    /** Take the lock or throw LedgerBusy. */
+    acquire(): void {
+        if (!this.tryAcquire()) throw new LedgerBusy("ledger lock held by another writer");
     }
 
     owned(): boolean {
-        return this.state(this.name)?.owner === this.owner;
+        return this.holder() === this.owner;
     }
 
-    /** Refresh `at` while holding the lock. */
-    touch(): void {
-        if (this.owned()) this.files.writeAtomic(this.name, this.content());
-    }
-
+    /** Remove the lock only if it names us. */
     release(): void {
         if (!this.owned()) return;
         try {

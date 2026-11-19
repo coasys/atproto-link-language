@@ -139,10 +139,6 @@ export interface PublisherOptions extends ReaderConfig {
     accounts: string[];
     writeTimeoutMs?: number;
     now?: () => Date;
-    /** a ledger lock older than this belongs to a dead writer (default 5 min) */
-    lockStaleMs?: number;
-    /** how long to wait for another writer's lock (default 30 s) */
-    lockWaitMs?: number;
 }
 
 const KEY = /^[A-Za-z0-9._:~-]{8,128}$/;
@@ -315,7 +311,7 @@ export class Publisher {
     private lock(): LedgerLock {
         if (!this.lockHandle) {
             this.lockHandle = new LedgerLock(this.opts.files!, ledgerFiles.lock(this.opts.agentDid()), this.owner,
-                () => Date.now(), this.opts.lockStaleMs ?? 300_000, this.opts.lockWaitMs ?? 30_000);
+                () => Date.now());
         }
         return this.lockHandle;
     }
@@ -438,7 +434,7 @@ export class Publisher {
             if (!this.files()) throw fail(publicationKey, "NO_ATOMIC_WRITE");
             const lock = this.lock();
             try {
-                await lock.acquire();
+                lock.acquire();
             } catch (err) {
                 if (err instanceof LedgerBusy) throw fail(publicationKey, "LEDGER_BUSY");
                 throw fail(publicationKey, "LEDGER_WRITE_FAILED");
@@ -511,7 +507,6 @@ export class Publisher {
 
         e = { ...e, attempts: e.attempts + 1 };
         this.save(e); // the attempt is on record before anything is sent
-        this.lock().touch();
         const uri = `at://${account}/${POST_NSID}/${e.rkey}`;
         const body = JSON.stringify({
             repo: account,
@@ -548,7 +543,7 @@ export class Publisher {
             reason = err instanceof TimeoutError ? "timed out" : "transport error";
         }
         try {
-            this.save({ ...e, lastError: reason });
+            if (this.lock().owned()) this.save({ ...e, lastError: reason });
         } catch {
             // the attempt is already on record; the diagnostic is optional
         }

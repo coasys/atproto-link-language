@@ -171,11 +171,14 @@ addresses never write.
   A lock file `publish-ledger.<agent did>.lock`, created with the host's
   `createStorageFileExclusive` (O_EXCL) and removed with
   `removeStorageFile`, admits one writer at a time across processes sharing
-  the storage dir (src/mount/ledger-lock.ts; stale after 5 min, broken
-  under a takeover lock). None of these host functions is in acorn a9
-  `c9d4a8de1`: they are on the local ad4m branch
-  `atproto-s2/atomic-storage-write` (`9d246bce2`; Windows skips the
-  directory fsync). Without them publishing is refused. Never move the
+  the storage dir (src/mount/ledger-lock.ts). No lock is ever stolen: a
+  second writer is refused at once (LEDGER_BUSY), and a lock left by a
+  writer that died needs the manual recovery in ledger-lock.ts (stop every
+  executor on the data dir, delete `publish-ledger.<agent did>.lock`).
+  None of these host functions is in acorn a9 `c9d4a8de1`: they are on the
+  local ad4m branch `atproto-s2/atomic-storage-write` (`a56812fac`; the
+  lock file is published by temp + hard link; the Windows path, which skips
+  the directory fsync, is simulated only). Without them publishing is refused. Never move the
   ledger back to the KV (best effort, non-atomic), and never write it
   outside the lock.
 - Errors that cross the publication boundary are `<CODE>: <fixed

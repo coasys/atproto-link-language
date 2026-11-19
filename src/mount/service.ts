@@ -35,9 +35,6 @@ export interface ServiceOptions {
     /** the language storage directory with the host's atomic write; without
      *  it publishing is refused (the ledger must be durable) */
     files?: DurableFiles;
-    /** ledger lock timings (defaults: stale after 5 min, wait 30 s) */
-    lockStaleMs?: number;
-    lockWaitMs?: number;
     crypto: WebCrypto;
     agent: AgentAccess;
     languageAddress: () => string;
@@ -81,7 +78,7 @@ export class MountService {
             vault: this.vault, nonces: new DpopNonces(), now: opts.now,
         });
         this.publisher = new Publisher({
-            ...cfg, transport: writeTransport, storage: opts.storage, files: opts.files, lockStaleMs: opts.lockStaleMs, lockWaitMs: opts.lockWaitMs, oauth: this.oauth, agentDid: () => opts.agent.did(),
+            ...cfg, transport: writeTransport, storage: opts.storage, files: opts.files, oauth: this.oauth, agentDid: () => opts.agent.did(),
             crypto: opts.crypto, accounts: this.reader.accounts, writeTimeoutMs: opts.writeTimeoutMs, now: opts.now,
         });
     }

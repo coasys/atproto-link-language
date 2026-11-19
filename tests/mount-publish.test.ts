@@ -648,16 +648,18 @@ describe("round 3 item 2: one writer at a time per ledger, across processes", ()
     const P = { text: TEXT, atAuthor: ALICE, publicationKey: KEY };
     const attemptsSince = attempts;
 
-    it("two publishers (separate instances, one storage dir) racing one publicationKey make exactly one post", async () => {
+    it("two publishers (separate instances, one storage dir) racing one publicationKey: one wins, the other is refused (LEDGER_BUSY), one post", async () => {
         const { net, svc, agent, storage } = await ready();
         const { svc: other } = service(net, { agent, storage }); // a second process on the same dir
         const mark = net.requestsLog.length;
         const [a, b] = await Promise.allSettled([svc.call("class/ATPost", "publish", P), other.call("class/ATPost", "publish", P)]);
         assert.equal(a.status, "fulfilled", String((a as any).reason));
-        assert.equal(b.status, "fulfilled", String((b as any).reason));
-        assert.deepEqual((a as any).value, (b as any).value);
+        assert.equal(b.status, "rejected", "the second writer does not wait for the first");
+        assert.match(String((b as any).reason), /LEDGER_BUSY/);
         assert.equal(attemptsSince(net, mark).length, 1, "one createRecord");
         assert.equal(net.postsWithText(ALICE, TEXT).length, 1, "one post");
+        // once the first is done, the key answers from the ledger in either process
+        assert.deepEqual(await other.call("class/ATPost", "publish", P), (a as any).value);
     });
 
     it("rkeys stay unique across publishers on one dir, even with the same clock id at a frozen clock", async () => {
@@ -682,24 +684,30 @@ describe("round 3 item 2: one writer at a time per ledger, across processes", ()
         for (const t of ["b1", "a1", "b2"]) assert.equal(net.postsWithText(ALICE, t).length, 1, t);
     });
 
-    it("a live lock held by another writer: wait, then refuse with no request", async () => {
+    it("a lock held by another writer: refused at once, no request", async () => {
         const { net, storage, agent } = await ready();
-        const { svc } = service(net, { agent, storage, lockWaitMs: 300 });
+        const { svc } = service(net, { agent, storage });
         storage.disk.files.set(`publish-ledger.${agent.did}.lock`, JSON.stringify({ owner: "someone-else", at: Date.now() }));
         const mark = net.requestsLog.length;
         await assert.rejects(svc.call("class/ATPost", "publish", P), /LEDGER_BUSY/);
         assert.deepEqual(net.requestsLog.slice(mark).map((r) => r.url), []);
     });
 
-    it("a stale lock (a writer that died) is taken over; the publication proceeds and the lock is released", async () => {
+    it("a stale lock (a writer that died an hour ago) blocks: no steal, no request; manual recovery unblocks", async () => {
         const { net, storage, agent } = await ready();
-        const { svc } = service(net, { agent, storage, lockWaitMs: 300 });
+        const { svc } = service(net, { agent, storage });
         const lock = `publish-ledger.${agent.did}.lock`;
-        storage.disk.files.set(lock, JSON.stringify({ owner: "dead-writer", at: Date.now() - 3_600_000 }));
+        const stale = JSON.stringify({ owner: "dead-writer", at: Date.now() - 3_600_000 });
+        storage.disk.files.set(lock, stale);
+        const mark = net.requestsLog.length;
+        await assert.rejects(svc.call("class/ATPost", "publish", P), /LEDGER_BUSY/);
+        assert.deepEqual(net.requestsLog.slice(mark).map((r) => r.url), []);
+        assert.equal(storage.disk.files.get(lock), stale, "not stolen");
+        // the documented recovery: with every executor on the dir stopped, delete the lock file
+        storage.disk.files.delete(lock);
         await svc.call("class/ATPost", "publish", P);
         assert.equal(net.postsWithText(ALICE, TEXT).length, 1);
         assert.equal(storage.disk.files.has(lock), false, "released");
-        assert.equal(storage.disk.files.has(`${lock}.takeover`), false);
     });
 
     it("a host without exclusive create cannot publish", async () => {
