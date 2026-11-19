@@ -45,6 +45,15 @@ describe("rule 3: DID resolution through validated PDS discovery", () => {
         await assert.rejects(resolveDid(ALICE, net, baseConfig), /endpoint/);
     });
 
+    it("rejects a PDS endpoint that carries credentials, a query or a fragment", async () => {
+        for (const ep of ["https://user:pw@pds.test", "https://pds.test/?x=1", "https://pds.test/#frag"]) {
+            const net = standardNet();
+            net.didDocs.set(ALICE, net.docFor(ALICE, "alice.test", ep));
+            await assert.rejects(readAccount(ALICE, net, baseConfig), /bare origin/, ep);
+            assert.deepEqual(net.requests(/\/xrpc\//), [], `no PDS request for ${ep}`);
+        }
+    });
+
     it("rejects path did:web and non-ATProto DID methods without any request", async () => {
         const net = standardNet();
         await assert.rejects(resolveDid("did:web:example.com:user:alice", net, baseConfig), /did:web/);
@@ -71,6 +80,18 @@ describe("rule 3: DID resolution through validated PDS discovery", () => {
             return orig(url, m, h, b);
         };
         await assert.rejects(readAccount(ALICE, net, baseConfig), /describeRepo/);
+    });
+
+    it("rejects a getRepoStatus answer for another DID (it cannot hide this account)", async () => {
+        const net = standardNet();
+        const orig = net.fetch.bind(net);
+        net.fetch = async (url, m, h, b) => {
+            if (url.includes("getRepoStatus")) {
+                return { status: 200, headers: {}, body: JSON.stringify({ did: BOB, active: false, status: "deactivated" }) };
+            }
+            return orig(url, m, h, b);
+        };
+        await assert.rejects(readAccount(ALICE, net, baseConfig), /getRepoStatus/);
     });
 
     it("rejects listed records whose URI names another repo", async () => {
