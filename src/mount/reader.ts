@@ -121,7 +121,7 @@ async function getJson(transport: Transport, url: string, cfg: ReaderConfig): Pr
 }
 
 /** Refuse a non-https URL unless the dev exception is on. */
-function requireScheme(url: string, cfg: ReaderConfig, what: string): void {
+export function requireScheme(url: string, cfg: ReaderConfig, what: string): void {
     let p: string;
     try {
         p = new URL(url).protocol;

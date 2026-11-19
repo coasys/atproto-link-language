@@ -451,13 +451,17 @@ describe("rule 6: account deactivation hides its records", () => {
     });
 });
 
-describe("shapes: read-only ATPost / ATFollow / ATAccount", () => {
-    it("declare no constructor, destructor, setter or writable property", () => {
-        const s = mountShapes();
+describe("shapes: ATPost / ATFollow / ATAccount", () => {
+    // Slice 1 had no constructor at all; slice 2 adds exactly one, ATPost's
+    // explicit publish call (mount-publish.test.ts rule 1).
+    it("declare no constructor but ATPost's publish call, and no destructor, setter or writable property", () => {
+        const s = mountShapes("QmzLang");
         assert.deepEqual(s.shapes.map((x: any) => x.name), [...CLASS_NAMES]);
         assert.ok(typeof s.version === "string" && s.version.length > 0);
-        for (const { shape } of s.shapes as any[]) {
-            assert.deepEqual(shape.constructor_actions, []);
+        for (const { name, shape } of s.shapes as any[]) {
+            assert.deepEqual(shape.constructor_actions, name === "ATPost"
+                ? [{ action: "call", source: "QmzLang://class/ATPost", predicate: "publish", target: "{}" }]
+                : []);
             assert.deepEqual(shape.destructor_actions, []);
             for (const p of shape.properties) {
                 assert.ok(!p.writable && !p.setter, `${p.name} is writable`);
@@ -469,7 +473,7 @@ describe("shapes: read-only ATPost / ATFollow / ATAccount", () => {
         const net = standardNet();
         const r = reader(net);
         await r.refresh();
-        const s = mountShapes();
+        const s = mountShapes("QmzLang");
         for (const e of r.snapshot().entries) {
             const shape: any = (s.shapes as any[]).find((x) => x.name === e.class)!.shape;
             const names = new Set(shape.properties.map((p: any) => p.name));
@@ -478,7 +482,7 @@ describe("shapes: read-only ATPost / ATFollow / ATAccount", () => {
     });
 
     it("TextContent alias only on ATPost.text", () => {
-        const s = mountShapes();
+        const s = mountShapes("QmzLang");
         const aliased = (s.shapes as any[]).flatMap((x) =>
             x.shape.properties.filter((p: any) => p.alias).map((p: any) => `${x.name}.${p.name}`));
         assert.deepEqual(aliased, ["ATPost.text"]);

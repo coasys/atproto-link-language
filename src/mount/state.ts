@@ -142,6 +142,11 @@ export class MountedReader {
         }
     }
 
+    /** The revision of the last accepted complete read of `did`, if any. */
+    acceptedRev(did: string): string | undefined {
+        return this.accepted.get(did)?.rev;
+    }
+
     /** Whether any account has a complete inventory (this run or persisted). */
     hasSnapshot(): boolean {
         return this.perAccount.size > 0;

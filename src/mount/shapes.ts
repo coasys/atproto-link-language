@@ -1,15 +1,20 @@
 /**
- * Read-only SHACL shapes for the mounted reader (Acorn mount contract,
+ * SHACL shapes for the mounted ATProto language (Acorn mount contract,
  * `mountShapes()` -> `{version, shapes: [{name, shape}]}`; same JSON shape
- * the Acorn language emits). No constructor, destructor, setter or writable
- * property: this slice exposes no write interactions.
+ * the Acorn language emits).
+ *
+ * Slice 2: ATPost has one constructor, an acorn a2 `call` action to
+ * `<lang>://class/ATPost` `publish` — explicit publication of a plain-text
+ * post (publisher.ts). Nothing else writes: no destructor, setter or
+ * writable property on any class, so a model write to a mounted instance
+ * (an annotation) never reaches the language or a PDS.
  *
  * Property kinds: "ref" props are IRIs (DIDs); everything else lands as the
  * executor's deterministic literal. `createdAt` is a reserved model name,
  * hence `postCreatedAt` / `followCreatedAt`.
  */
 
-export const SHAPES_VERSION = "1";
+export const SHAPES_VERSION = "2";
 
 export const CLASS_NAMES = ["ATPost", "ATFollow", "ATAccount"] as const;
 export type ClassName = (typeof CLASS_NAMES)[number];
@@ -43,6 +48,8 @@ const CLASSES: Record<ClassName, Prop[]> = {
         { name: "moderation" },
         { name: "labels" },
         { name: "activeLabels", collection: true },
+        /** the publication key, on posts published through this language */
+        { name: "publicationKey" },
         ...RECORD_PROPS,
     ],
     ATFollow: [
@@ -75,14 +82,22 @@ function propShape(p: Prop): Record<string, unknown> {
     return shape;
 }
 
-export function mountShapes() {
+/** The one write: ATPost's constructor calls `publish` on the language's
+ *  class address (a constructor has no instance for `source: "this"`). */
+function constructorOf(name: ClassName, languageAddress: string) {
+    if (name !== "ATPost") return [];
+    return [{ action: "call", source: `${languageAddress}://class/ATPost`, predicate: "publish", target: "{}" }];
+}
+
+export function mountShapes(languageAddress: string) {
+    if (!languageAddress) throw new Error("mountShapes needs the language address");
     return {
         version: SHAPES_VERSION,
         shapes: CLASS_NAMES.map((name) => ({
             name,
             shape: {
                 target_class: classIri(name),
-                constructor_actions: [],
+                constructor_actions: constructorOf(name, languageAddress),
                 destructor_actions: [],
                 properties: [
                     { path: "rdf://type", name: "type", has_value: classIri(name), min_count: 1, max_count: 1 },

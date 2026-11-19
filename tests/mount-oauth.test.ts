@@ -20,8 +20,9 @@ import { ALICE, BOB, FakeAgent, ISSUER, MemStorage, PDS, SCOPE, testCrypto, writ
 
 const LANG = "QmzTestLanguage";
 
-function service(net: FakeWriteNet, over: Partial<ServiceOptions> & { agent?: FakeAgent } = {}) {
-    const agent = over.agent ?? new FakeAgent();
+function service(net: FakeWriteNet, opts: Omit<Partial<ServiceOptions>, "agent"> & { agent?: FakeAgent } = {}) {
+    const { agent: given, ...over } = opts;
+    const agent = given ?? new FakeAgent();
     const storage = over.storage ?? new MemStorage();
     const svc = new MountService({
         accounts: [ALICE, BOB],

@@ -128,7 +128,7 @@ describe("rule 7 (language side): text, follow targets, AT author vs signer", ()
         for (const e of entries) {
             assert.ok(!("author" in e.data), `${e.address} has an author field`);
         }
-        const shapes = mountShapes();
+        const shapes = mountShapes("QmzLang");
         for (const { name, shape } of shapes.shapes as any[]) {
             const names = shape.properties.map((p: any) => p.name);
             assert.ok(!names.includes("author"), `${name} declares author`);

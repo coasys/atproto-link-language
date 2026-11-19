@@ -14,16 +14,11 @@ import { build } from "esbuild";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { HERE, ldkEntry } from "./mount-ldk.mjs";
+import { TEMPLATE_VARS } from "./mount-template.mjs";
 
 const LDK = ldkEntry("mount-build");
 
-const VARS = [
-  ["ACCOUNTS", ""],
-  ["PLC_URL", "https://plc.directory"],
-  ["APPVIEW_URL", ""],
-  ["POLL_MS", "60000"],
-  ["ALLOW_HTTP", ""],
-];
+const VARS = TEMPLATE_VARS;
 const BANNER = VARS.map(([k, v]) => `//!@ad4m-template-variable\nconst ${k} = ${JSON.stringify(v)};`).join("\n");
 
 const out = join(HERE, "build", "mount", "bundle.js");
