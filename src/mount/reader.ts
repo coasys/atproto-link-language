@@ -75,7 +75,22 @@ export interface Label {
     [k: string]: unknown;
 }
 
-export class ReadError extends Error {}
+/** Why a read failed. The refresh/status report shows only the code's
+ *  fixed sentence (state.ts `reportError`), never this error's message:
+ *  messages may quote server fields (round 4 #3). `detail` is built only
+ *  from an HTTP status and an allowlisted protocol identifier. */
+export type ReadCode =
+    | "TIMEOUT" | "HTTP_ERROR" | "BAD_JSON" | "URL_NOT_ALLOWED" | "PDS_ENDPOINT_INVALID" | "BAD_DID"
+    | "DID_UNRESOLVED" | "MALFORMED_ANSWER" | "REPO_MISMATCH" | "REV_NOT_TID" | "BAD_COLLECTION"
+    | "INVENTORY_INCOMPLETE" | "MALFORMED_PAGE" | "RECORD_INVALID" | "INVENTORY_UNSTABLE" | "DUPLICATE_RECORD"
+    | "REVISION_REGRESSED" | "COMMIT_CONFLICT" | "INVENTORY_CONTRADICTION" | "PUBLICATION_READBACK"
+    | "STORAGE_WRITE_FAILED" | "READ_FAILED";
+
+export class ReadError extends Error {
+    constructor(message: string, readonly code: ReadCode = "READ_FAILED", readonly detail?: string) {
+        super(message);
+    }
+}
 
 /** An ATProto TID: 13 chars of the base32-sortable alphabet
  *  "234567abcdefghijklmnopqrstuvwxyz", the first in "234567abcdefghij" (the
@@ -94,7 +109,7 @@ const RKEY = /^[A-Za-z0-9._:~-]{1,512}$/;
 function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
     let timer: ReturnType<typeof setTimeout>;
     const t = new Promise<never>((_, rej) => {
-        timer = setTimeout(() => rej(new ReadError(`${what} timed out after ${ms} ms`)), ms);
+        timer = setTimeout(() => rej(new ReadError(`${what} timed out after ${ms} ms`, "TIMEOUT")), ms);
     });
     return Promise.race([p, t]).finally(() => clearTimeout(timer));
 }
@@ -108,7 +123,8 @@ async function getText(transport: Transport, url: string, cfg: ReaderConfig): Pr
     );
     if (res.status < 200 || res.status > 299) {
         // no body excerpt: a server may echo a secret it saw (round 3 #1)
-        throw new ReadError(`${what} -> ${serverError({ status: res.status, body: String(res.body) })}${res.status === 429 ? " (rate limited)" : ""}`);
+        const detail = `HTTP ${serverError({ status: res.status, body: String(res.body) })}${res.status === 429 ? " (rate limited)" : ""}`;
+        throw new ReadError(`${what} -> ${detail}`, "HTTP_ERROR", detail);
     }
     return res.body;
 }
@@ -118,7 +134,7 @@ async function getJson(transport: Transport, url: string, cfg: ReaderConfig): Pr
     try {
         return parseLossless(body);
     } catch (e) {
-        throw new ReadError(`GET ${url.split("?")[0]}: invalid JSON (${(e as Error).message})`);
+        throw new ReadError(`GET ${url.split("?")[0]}: invalid JSON (${(e as Error).message})`, "BAD_JSON");
     }
 }
 
@@ -128,22 +144,22 @@ export function requireScheme(url: string, cfg: ReaderConfig, what: string): voi
     try {
         p = new URL(url).protocol;
     } catch {
-        throw new ReadError(`${what} is not a URL: ${url}`);
+        throw new ReadError(`${what} is not a URL: ${url}`, "URL_NOT_ALLOWED");
     }
     if (p === "https:" || (p === "http:" && cfg.allowHttp)) return;
-    throw new ReadError(`${what} must be https${p === "http:" ? " (http only with allowHttp, for a local dev network)" : ""}: ${url}`);
+    throw new ReadError(`${what} must be https${p === "http:" ? " (http only with allowHttp, for a local dev network)" : ""}: ${url}`, "URL_NOT_ALLOWED");
 }
 
 function httpBase(endpoint: unknown, cfg: ReaderConfig): string {
-    if (typeof endpoint !== "string") throw new ReadError("PDS endpoint is not a string");
+    if (typeof endpoint !== "string") throw new ReadError("PDS endpoint is not a string", "PDS_ENDPOINT_INVALID");
     let u: URL;
     try {
         u = new URL(endpoint);
     } catch {
-        throw new ReadError(`PDS endpoint is not a URL: ${endpoint}`);
+        throw new ReadError(`PDS endpoint is not a URL: ${endpoint}`, "PDS_ENDPOINT_INVALID");
     }
-    if (u.protocol !== "https:" && u.protocol !== "http:") throw new ReadError(`PDS endpoint must be http(s): ${endpoint}`);
-    if (u.username || u.password || u.search || u.hash) throw new ReadError(`PDS endpoint must be a bare origin: ${endpoint}`);
+    if (u.protocol !== "https:" && u.protocol !== "http:") throw new ReadError(`PDS endpoint must be http(s): ${endpoint}`, "PDS_ENDPOINT_INVALID");
+    if (u.username || u.password || u.search || u.hash) throw new ReadError(`PDS endpoint must be a bare origin: ${endpoint}`, "PDS_ENDPOINT_INVALID");
     requireScheme(endpoint, cfg, "PDS endpoint");
     return u.origin + u.pathname.replace(/\/+$/, "");
 }
@@ -153,30 +169,30 @@ function httpBase(endpoint: unknown, cfg: ReaderConfig): string {
  *  https://<host>/.well-known/did.json. The document's `id` must be the
  *  requested DID; no fallback PDS, handle lookup or default is ever used. */
 export async function resolveDid(did: string, transport: Transport, cfg: ReaderConfig): Promise<ResolvedAccount> {
-    if (typeof did !== "string" || !did.startsWith("did:")) throw new ReadError(`not a DID: ${did}`);
+    if (typeof did !== "string" || !did.startsWith("did:")) throw new ReadError(`not a DID: ${did}`, "BAD_DID");
     let url: string;
     if (did.startsWith("did:plc:")) {
-        if (!DID_PLC.test(did)) throw new ReadError(`malformed did:plc: ${did}`);
+        if (!DID_PLC.test(did)) throw new ReadError(`malformed did:plc: ${did}`, "BAD_DID");
         requireScheme(cfg.plcUrl, cfg, "PLC directory URL");
         url = `${cfg.plcUrl.replace(/\/+$/, "")}/${did}`;
     } else if (did.startsWith("did:web:")) {
         const m = DID_WEB.exec(did);
-        if (!m) throw new ReadError(`did:web must be a bare hostname (no path): ${did}`);
+        if (!m) throw new ReadError(`did:web must be a bare hostname (no path): ${did}`, "BAD_DID");
         url = `https://${decodeURIComponent(m[1])}/.well-known/did.json`;
     } else {
-        throw new ReadError(`unsupported DID method for an ATProto account: ${did}`);
+        throw new ReadError(`unsupported DID method for an ATProto account: ${did}`, "BAD_DID");
     }
     let doc: any;
     try {
         doc = await getJson(transport, url, cfg);
     } catch (e) {
-        throw new ReadError(`cannot resolve ${did}: ${(e as Error).message}`);
+        throw new ReadError(`cannot resolve ${did}: ${(e as Error).message}`, "DID_UNRESOLVED");
     }
-    if (!doc || doc.id !== did) throw new ReadError(`cannot resolve ${did}: DID document id is ${JSON.stringify(doc?.id)}`);
+    if (!doc || doc.id !== did) throw new ReadError(`cannot resolve ${did}: DID document id is ${JSON.stringify(doc?.id)}`, "DID_UNRESOLVED");
     const services = Array.isArray(doc.service) ? doc.service : [];
     const svc = services.find((s: any) =>
         (s?.id === "#atproto_pds" || s?.id === `${did}#atproto_pds`) && s?.type === "AtprotoPersonalDataServer");
-    if (!svc) throw new ReadError(`cannot resolve ${did}: no #atproto_pds service`);
+    if (!svc) throw new ReadError(`cannot resolve ${did}: no #atproto_pds service`, "DID_UNRESOLVED");
     const pds = httpBase(svc.serviceEndpoint, cfg);
     const aka = Array.isArray(doc.alsoKnownAs) ? doc.alsoKnownAs : [];
     const handleUri = aka.find((a: unknown) => typeof a === "string" && a.startsWith("at://"));
@@ -204,7 +220,7 @@ export async function readAccount(did: string, transport: Transport, cfg: Reader
     const xrpc = (m: string, params: Record<string, string | undefined>) => `${acct.pds}/xrpc/${m}?${q(params)}`;
 
     const status = await getJson(transport, xrpc("com.atproto.sync.getRepoStatus", { did }), cfg);
-    if (status?.did !== did || typeof status?.active !== "boolean") throw new ReadError(`getRepoStatus for ${did}: malformed answer`);
+    if (status?.did !== did || typeof status?.active !== "boolean") throw new ReadError(`getRepoStatus for ${did}: malformed answer`, "MALFORMED_ANSWER");
     if (!status.active) {
         // Deactivated / taken down / suspended: a complete answer — the
         // account has no visible records right now.
@@ -213,14 +229,14 @@ export async function readAccount(did: string, transport: Transport, cfg: Reader
     }
 
     const desc = await getJson(transport, xrpc("com.atproto.repo.describeRepo", { repo: did }), cfg);
-    if (desc?.did !== did) throw new ReadError(`describeRepo on ${acct.pds} answered for ${JSON.stringify(desc?.did)}, not ${did}`);
+    if (desc?.did !== did) throw new ReadError(`describeRepo on ${acct.pds} answered for ${JSON.stringify(desc?.did)}, not ${did}`, "REPO_MISMATCH");
 
     const head = async () => {
         const c = await getJson(transport, xrpc("com.atproto.sync.getLatestCommit", { did }), cfg);
-        if (typeof c?.rev !== "string" || typeof c?.cid !== "string") throw new ReadError(`getLatestCommit for ${did}: malformed answer`);
+        if (typeof c?.rev !== "string" || typeof c?.cid !== "string") throw new ReadError(`getLatestCommit for ${did}: malformed answer`, "MALFORMED_ANSWER");
         // The accepted-state guard (state.ts) compares revs as strings, which
         // orders them only when both are well-formed TIDs.
-        if (!isTid(c.rev)) throw new ReadError(`getLatestCommit for ${did}: rev ${JSON.stringify(c.rev)} is not a valid TID`);
+        if (!isTid(c.rev)) throw new ReadError(`getLatestCommit for ${did}: rev ${JSON.stringify(c.rev)} is not a valid TID`, "REV_NOT_TID");
         return { rev: c.rev as string, cid: c.cid as string };
     };
     const start = await head();
@@ -229,27 +245,27 @@ export async function readAccount(did: string, transport: Transport, cfg: Reader
     const pageLimit = Math.min(Math.max(cfg.pageLimit ?? 100, 1), 100);
     const maxPages = cfg.maxPages ?? 50;
     for (const collection of cfg.collections ?? DEFAULT_COLLECTIONS) {
-        if (!NSID.test(collection)) throw new ReadError(`bad collection NSID ${collection}`);
+        if (!NSID.test(collection)) throw new ReadError(`bad collection NSID ${collection}`, "BAD_COLLECTION");
         let cursor: string | undefined;
         const seen = new Set<string>();
         for (let page = 0; ; page++) {
-            if (page >= maxPages) throw new ReadError(`${did} ${collection}: more than ${maxPages} pages — inventory incomplete`);
+            if (page >= maxPages) throw new ReadError(`${did} ${collection}: more than ${maxPages} pages — inventory incomplete`, "INVENTORY_INCOMPLETE");
             const res = await getJson(transport, xrpc("com.atproto.repo.listRecords", { repo: did, collection, limit: String(pageLimit), cursor }), cfg);
-            if (!res || !Array.isArray(res.records)) throw new ReadError(`listRecords ${did} ${collection}: malformed page`);
+            if (!res || !Array.isArray(res.records)) throw new ReadError(`listRecords ${did} ${collection}: malformed page`, "MALFORMED_PAGE");
             for (const r of res.records) {
                 const uri = r?.uri;
                 const m = typeof uri === "string" ? /^at:\/\/([^/]+)\/([^/]+)\/([^/]+)$/.exec(uri) : null;
-                if (!m) throw new ReadError(`listRecords ${did}: malformed record URI ${JSON.stringify(uri)}`);
-                if (m[1] !== did) throw new ReadError(`listRecords ${did}: record ${uri} names another repo`);
-                if (m[2] !== collection) throw new ReadError(`listRecords ${did}: record ${uri} is outside ${collection}`);
-                if (!RKEY.test(m[3]) || m[3] === "." || m[3] === "..") throw new ReadError(`listRecords ${did}: bad record key in ${uri}`);
-                if (typeof r.cid !== "string" || !r.cid) throw new ReadError(`listRecords ${did}: record ${uri} has no CID`);
-                if (!r.value || typeof r.value !== "object" || Array.isArray(r.value)) throw new ReadError(`listRecords ${did}: record ${uri} has no object value`);
+                if (!m) throw new ReadError(`listRecords ${did}: malformed record URI ${JSON.stringify(uri)}`, "RECORD_INVALID");
+                if (m[1] !== did) throw new ReadError(`listRecords ${did}: record ${uri} names another repo`, "RECORD_INVALID");
+                if (m[2] !== collection) throw new ReadError(`listRecords ${did}: record ${uri} is outside ${collection}`, "RECORD_INVALID");
+                if (!RKEY.test(m[3]) || m[3] === "." || m[3] === "..") throw new ReadError(`listRecords ${did}: bad record key in ${uri}`, "RECORD_INVALID");
+                if (typeof r.cid !== "string" || !r.cid) throw new ReadError(`listRecords ${did}: record ${uri} has no CID`, "RECORD_INVALID");
+                if (!r.value || typeof r.value !== "object" || Array.isArray(r.value)) throw new ReadError(`listRecords ${did}: record ${uri} has no object value`, "RECORD_INVALID");
                 records.push({ uri, cid: r.cid, collection, rkey: m[3], value: r.value });
             }
             if (res.cursor === undefined || res.cursor === null || res.cursor === "") break;
-            if (typeof res.cursor !== "string") throw new ReadError(`listRecords ${did}: malformed cursor`);
-            if (seen.has(res.cursor) || res.records.length === 0) throw new ReadError(`listRecords ${did} ${collection}: cursor ${res.cursor} repeats — inventory incomplete`);
+            if (typeof res.cursor !== "string") throw new ReadError(`listRecords ${did}: malformed cursor`, "MALFORMED_PAGE");
+            if (seen.has(res.cursor) || res.records.length === 0) throw new ReadError(`listRecords ${did} ${collection}: cursor ${res.cursor} repeats — inventory incomplete`, "INVENTORY_INCOMPLETE");
             seen.add(res.cursor);
             cursor = res.cursor;
         }
@@ -257,11 +273,11 @@ export async function readAccount(did: string, transport: Transport, cfg: Reader
 
     const end = await head();
     if (end.rev !== start.rev || end.cid !== start.cid) {
-        throw new ReadError(`${did}: repo revision moved from ${start.rev} to ${end.rev} during the read — inventory not stable`);
+        throw new ReadError(`${did}: repo revision moved from ${start.rev} to ${end.rev} during the read — inventory not stable`, "INVENTORY_UNSTABLE");
     }
     const uris = new Set<string>();
     for (const r of records) {
-        if (uris.has(r.uri)) throw new ReadError(`${did}: record ${r.uri} listed twice`);
+        if (uris.has(r.uri)) throw new ReadError(`${did}: record ${r.uri} listed twice`, "DUPLICATE_RECORD");
         uris.add(r.uri);
     }
     return { ...acct, active: true, rev: start.rev, commitCid: start.cid, records };

@@ -17,7 +17,7 @@
 
 import type { StorageAdapter, Transport } from "../adapters.js";
 import { entriesFor, type MountEntry } from "./mapping.js";
-import { fetchLabels, isTid, readAccount, POST_NSID, ReadError, type AccountRead, type ReaderConfig } from "./reader.js";
+import { fetchLabels, isTid, readAccount, POST_NSID, ReadError, type AccountRead, type ReadCode, type ReaderConfig } from "./reader.js";
 
 export interface MountedReaderOptions extends ReaderConfig {
     /** allowlisted account DIDs; nothing else is ever read or mounted */
@@ -77,17 +77,50 @@ export interface Accepted {
  *  what was already accepted. A NEWER revision is accepted whatever its size
  *  — a cursor-less short page on a new commit remains a transport-trust
  *  assumption (see REPORT, Limits). */
-export function contradiction(prev: Accepted | undefined, read: AccountRead): string | null {
+export function contradiction(prev: Accepted | undefined, read: AccountRead): "REVISION_REGRESSED" | "COMMIT_CONFLICT" | "INVENTORY_CONTRADICTION" | null {
     if (!prev || !read.active || read.rev === undefined || read.commitCid === undefined) return null;
-    if (read.rev < prev.rev) return `repo revision regressed from ${prev.rev} to ${read.rev} — stale or rolled-back PDS`;
+    if (read.rev < prev.rev) return "REVISION_REGRESSED";
     if (read.rev > prev.rev) return null;
-    if (read.commitCid !== prev.commitCid) return `revision ${read.rev} now has commit ${read.commitCid}, accepted ${prev.commitCid}`;
+    if (read.commitCid !== prev.commitCid) return "COMMIT_CONFLICT";
     const inv = inventoryOf(read);
     const a = Object.keys(prev.inventory), b = Object.keys(inv);
-    if (a.length !== b.length || a.some((u) => prev.inventory[u] !== inv[u])) {
-        return `inventory at unchanged commit ${read.commitCid} differs from the accepted one (${a.length} vs ${b.length} records) — partial listing`;
-    }
+    if (a.length !== b.length || a.some((u) => prev.inventory[u] !== inv[u])) return "INVENTORY_CONTRADICTION";
     return null;
+}
+
+/** The fixed sentence of every read failure code. Reports (refresh,
+ *  status) show `<CODE>: <sentence>` and at most an HTTP status with an
+ *  allowlisted identifier — never a server field, URL or inner message,
+ *  since a PDS can echo a credential it saw (round 4 #3). */
+const READ_SENTENCES: Record<ReadCode, string> = {
+    TIMEOUT: "a request to the account's PDS or DID directory timed out",
+    HTTP_ERROR: "a request to the account's PDS or DID directory failed",
+    BAD_JSON: "an answer was not valid JSON",
+    URL_NOT_ALLOWED: "a configured URL is not allowed (https unless ALLOW_HTTP)",
+    PDS_ENDPOINT_INVALID: "the DID document names a PDS endpoint that is not an allowed bare origin",
+    BAD_DID: "the account is not a supported atproto DID",
+    DID_UNRESOLVED: "the DID document is missing, names another id, or has no #atproto_pds service",
+    MALFORMED_ANSWER: "a repo status or head answer was malformed",
+    REPO_MISMATCH: "describeRepo answered for another DID",
+    REV_NOT_TID: "the repo revision is not a valid TID",
+    BAD_COLLECTION: "a configured collection is not a valid NSID",
+    INVENTORY_INCOMPLETE: "the inventory is incomplete (too many pages or a repeating cursor)",
+    MALFORMED_PAGE: "a listRecords page was malformed",
+    RECORD_INVALID: "a listed record is malformed or outside this repo or collection",
+    INVENTORY_UNSTABLE: "the repo revision moved during the read — inventory not stable",
+    DUPLICATE_RECORD: "a record was listed twice",
+    REVISION_REGRESSED: "the repo revision regressed below the accepted one — stale or rolled-back PDS",
+    COMMIT_CONFLICT: "the accepted revision now has another commit",
+    INVENTORY_CONTRADICTION: "the inventory at an unchanged commit differs from the accepted one — partial listing",
+    PUBLICATION_READBACK: "the inventory omits a publication the PDS still has, or it could not be checked — read refused",
+    STORAGE_WRITE_FAILED: "storage write failed, nothing changed",
+    READ_FAILED: "the account could not be read",
+};
+
+export function reportError(e: unknown): string {
+    const code: ReadCode = e instanceof ReadError ? e.code : "READ_FAILED";
+    const detail = e instanceof ReadError && e.detail ? ` (${e.detail})` : "";
+    return `${code}: ${READ_SENTENCES[code]}${detail}`;
 }
 
 function inventoryOf(read: AccountRead): Record<string, string> {
@@ -140,7 +173,7 @@ export class MountedReader {
         if (!isTid(a.rev)) {
             // A malformed baseline would order every later rev wrongly
             // (string comparison is only valid between TIDs).
-            this.restoreIssues.set(did, `accepted baseline discarded on restore: stored rev ${JSON.stringify(a.rev)} is not a valid TID`);
+            this.restoreIssues.set(did, "accepted baseline discarded on restore: its stored revision is not a valid TID");
         } else if (typeof a.commitCid === "string" && a.inventory && typeof a.inventory === "object") {
             this.accepted.set(did, { rev: a.rev, commitCid: a.commitCid, inventory: Object.assign(Object.create(null), a.inventory) });
         }
@@ -187,9 +220,9 @@ export class MountedReader {
             try {
                 const read = await readAccount(did, this.opts.transport, this.opts);
                 const bad = contradiction(this.accepted.get(did), read);
-                if (bad) throw new ReadError(`${did}: ${bad}`);
+                if (bad) throw new ReadError(`${did}: ${bad}`, bad);
                 const veto = this.opts.vet ? await this.opts.vet(did, read) : null;
-                if (veto) throw new ReadError(`${did}: ${veto}`);
+                if (veto) throw new ReadError(`${did}: ${veto}`, "PUBLICATION_READBACK");
                 const postUris = read.records.filter((r) => r.collection === POST_NSID).map((r) => r.uri);
                 const labels = read.active && postUris.length ? await fetchLabels(postUris, this.opts.transport, this.opts) : null;
                 const entries = entriesFor(read, labels, now);
@@ -204,7 +237,7 @@ export class MountedReader {
                     try {
                         this.opts.storage.put(storageKey(did), JSON.stringify({ v: 2, entries, ...(acc ? { accepted: acc } : {}) }));
                     } catch (e) {
-                        throw new ReadError(`${did}: storage write failed, nothing changed: ${(e as Error).message ?? e}`);
+                        throw new ReadError(`${did}: storage write failed, nothing changed`, "STORAGE_WRITE_FAILED");
                     }
                     // Best effort: a stale pre-round-3 key is ignored once
                     // the envelope exists, so a failure here changes nothing.
@@ -226,7 +259,7 @@ export class MountedReader {
                 });
             } catch (e) {
                 const warning = this.restoreIssues.get(did);
-                accounts.push({ did, ok: false, error: (e as Error).message ?? String(e), ...(warning ? { warning } : {}) });
+                accounts.push({ did, ok: false, error: reportError(e), ...(warning ? { warning } : {}) });
             }
         }
         const report: RefreshReport = { at: now.toISOString(), accounts, delta: diff(before, this.snapshot().entries) };

@@ -730,6 +730,34 @@ describe("round 3 item 3: publish is described as the interaction it is", () => 
     });
 });
 
+describe("round 4 item 3: refresh and status reports use fixed codes", () => {
+    const urlHas = (frag: string) => (u: string) => u.includes(frag) && u.includes(encodeURIComponent(ALICE));
+    const cases: Array<[string, (net: FakeWriteNet, token: string) => void, RegExp]> = [
+        ["getLatestCommit rev", (n, t) => n.faults.push({ match: urlHas("getLatestCommit"), status: 200, body: JSON.stringify({ cid: "bafyc", rev: t }), once: true }), /REV_NOT_TID/],
+        ["describeRepo did", (n, t) => n.faults.push({ match: urlHas("describeRepo"), status: 200, body: JSON.stringify({ did: `did:plc:${t}` }), once: true }), /REPO_MISMATCH/],
+        ["malformed listed URI", (n, t) => n.faults.push({ match: urlHas("listRecords"), status: 200, body: JSON.stringify({ records: [{ uri: `at://${t}/x/y`, cid: "b", value: {} }] }), once: true }), /RECORD_INVALID/],
+        ["record in another repo", (n, t) => n.faults.push({ match: urlHas("listRecords"), status: 200, body: JSON.stringify({ records: [{ uri: `at://did:plc:${t}/${POST}/3kaaaaaaaaa2a`, cid: "b", value: {} }] }), once: true }), /RECORD_INVALID/],
+        ["invalid JSON body", (n, t) => n.faults.push({ match: urlHas("getRepoStatus"), status: 200, body: `{"did": ${t}`, once: true }), /BAD_JSON/],
+        ["DID document id", (n, t) => n.didDocs.set(ALICE, { id: `did:plc:${t}`, service: [] }), /DID_UNRESOLVED/],
+        ["PDS endpoint with a query", (n, t) => n.didDocs.set(ALICE, { ...(n.docFor(ALICE, "alice.test", PDS) as any), service: [{ id: "#atproto_pds", type: "AtprotoPersonalDataServer", serviceEndpoint: `${PDS}/?${t}` }] }), /PDS_ENDPOINT_INVALID/],
+        ["PDS endpoint with a path (allowed; its 404 is reported by code)", (n, t) => n.didDocs.set(ALICE, { ...(n.docFor(ALICE, "alice.test", PDS) as any), service: [{ id: "#atproto_pds", type: "AtprotoPersonalDataServer", serviceEndpoint: `${PDS}/${t}` }] }), /HTTP_ERROR/],
+    ];
+    for (const [name, plant, code] of cases) {
+        it(`a token the PDS saw, echoed in ${name}, is in neither the refresh report nor status`, async () => {
+            const { net, svc } = await ready();
+            await svc.call("class/ATPost", "publish", { text: TEXT, atAuthor: ALICE, publicationKey: KEY });
+            const token = net.issued[0];
+            plant(net, token);
+            const report = await svc.refresh();
+            const status = await svc.call("project", "status");
+            const alice = report.accounts.find((a) => a.did === ALICE)!;
+            assert.equal(alice.ok, false);
+            assert.match(alice.error!, code);
+            for (const text of [JSON.stringify(report), JSON.stringify(status)]) assert.ok(!text.includes(token), `${name}: token in a report`);
+        });
+    }
+});
+
 describe("rule 4: read-back by a distinct account's reader", () => {
     it("bob's reader (another agent, no session) shows alice's new post with atAuthor = alice, and bob's follow of alice", async () => {
         const { net, svc } = await ready();
