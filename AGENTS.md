@@ -103,9 +103,10 @@ rendering in Bluesky**.
   is written via `applyWrites#create` and read back natively via
   `com.atproto.repo.getRecord` / `listRecords` as a clean post (no ad4m envelope).
 
-## Mounted reader (spike, `spike/mounted-reader`)
+## Mounted reader (spike, `spike/mounted-reader`; publication: `spike/mounted-reader-s2`)
 
-A second, independent, **read-only** entry point: `mount-index.ts`. It does
+A second, independent entry point: `mount-index.ts`, read-only except for
+the explicit publication below. It does
 not touch `index.ts`, Role A/B, `src/mst.ts`, the OR-set, the projection or
 app-password auth. It needs the Acorn A-step executor stack
 (`coasys/ad4m` `acorn/a9-mount-lifecycle`; plain `dev` has no mount API) and
@@ -136,3 +137,42 @@ MOUNT_LIVE=1 AD4M_EXECUTOR=<acorn executor> \
 
 The live test starts a local PLC + PDS (`live/pds.mjs`, @atproto/dev-env,
 two fresh accounts) and an executor on a temp data dir, and stops both.
+
+### Explicit publication (slice 2, `spike/mounted-reader-s2`)
+
+The one write: `ATPost`'s constructor is an acorn a2 `call` action to
+`<lang>://class/ATPost` `publish`, so `perspective.createSubject("ATPost",
+{text, atAuthor, publicationKey})` creates an `app.bsky.feed.post` through
+`com.atproto.repo.createRecord`. Refresh, snapshot, status and record
+addresses never write.
+
+- `src/mount/oauth.ts` — atproto OAuth: DID -> PDS -> protected-resource ->
+  AS discovery (checked), PAR, PKCE S256, DPoP ES256 + nonces, `iss`, token
+  `sub` / scope / type checks, the account's PDS must name the issuer.
+  Scope `atproto repo:app.bsky.feed.post?action=create`. Loopback client
+  (`http://localhost?...`, redirect `http://127.0.0.1/callback`): dev only.
+  Interactions on `<lang>://project`: `authorize {account}` -> URL to open;
+  `completeAuthorization {callbackUrl}`; `sessions`; `signOut {account}`.
+- `src/mount/vault.ts`, `sealed-box.ts` — tokens and DPoP keys only as boxes
+  sealed to the executor agent (executor `sealed_box.rs` format, opened by
+  `agentOpenSealed`), keyed `oauth/v1/session/<agent did>/<at did>`.
+- `src/mount/publisher.ts` — ledger per `publicationKey` with an rkey chosen
+  before the first send. Anything but a parsed success leaves it pending;
+  the next request with that key lists the account's posts before any
+  resend. Never add a resend path that skips the listing.
+- `src/mount/service.ts` — reader + publisher; `mount-index.ts` only binds
+  the host. OAuth/PDS writes use the isolate's `fetch` (they need the
+  DPoP-Nonce response header, which `httpFetch` does not return).
+- `mount-template.mjs` — the only template variables, all public. Never add
+  a credential: the template is stored in the bundle in the data dir.
+
+```bash
+node --import tsx --test tests/mount-publish.test.ts tests/mount-oauth.test.ts   # hermetic
+MOUNT_LIVE=1 AD4M_EXECUTOR=<acorn executor> \
+  node --import tsx --test --test-concurrency=1 tests/mount-publish-live.test.ts
+```
+
+The live test runs `live/pds.mjs` with `CONTROL_PORT` (request log, a
+"commit then drop the reply" fault, a file of issued secrets for the
+credential scan) and plays the person at the authorization page with a
+scripted, browser-less user agent (the AS's own sign-in/consent API).
