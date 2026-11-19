@@ -278,7 +278,7 @@ export class Publisher {
                 }
                 reason = `createRecord answered ${r.status} without the expected uri/cid`;
             } else {
-                reason = `createRecord answered ${serverError(r)}`;
+                reason = `createRecord answered ${serverError(r, [access.session.accessToken, access.session.refreshToken])}`;
                 // a 4xx was refused by the PDS; a 5xx may have committed
                 uncertain = r.status >= 500;
             }

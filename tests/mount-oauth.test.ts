@@ -222,6 +222,39 @@ describe("rule 2: atproto OAuth profile", () => {
         assert.deepEqual(await svc.call("project", "sessions"), []);
     });
 
+    it("a server that echoes a secret in its error text does not get it into our error", async () => {
+        const net = writeNet();
+        let now = Date.now();
+        net.nowMs = () => now;
+        net.accessTtlMs = 60_000;
+        const { svc } = service(net, { now: () => new Date(now) });
+        await svc.call("project", "completeAuthorization", {
+            callbackUrl: net.approve((await svc.call("project", "authorize", { account: ALICE })).authorizeUrl, ALICE),
+        });
+        const [access, refresh] = net.issued;
+        // the AS now refuses refreshes, quoting the request back
+        const orig = net.fetch.bind(net);
+        net.fetch = async (url, method, headers, body) => {
+            if (url === `${ISSUER}/oauth/token` && formOf(body).grant_type === "refresh_token") {
+                await orig(url, method, headers, body); // keep the nonce dance realistic
+                return { status: 500, headers: {}, body: JSON.stringify({ error: "server_error", error_description: `cannot use ${formOf(body).refresh_token} (${body})` }) };
+            }
+            if (url.includes("createRecord")) {
+                return { status: 400, headers: {}, body: JSON.stringify({ error: "InvalidRequest", message: `bad ${headers.Authorization ?? headers.authorization}` }) };
+            }
+            return orig(url, method, headers, body);
+        };
+        now += 120_000;
+        const err1 = await svc.call("class/ATPost", "publish", { text: "x", atAuthor: ALICE, publicationKey: "echo-key-001" }).catch((e) => e);
+        assert.ok(err1 instanceof Error);
+        assert.ok(!err1.message.includes(refresh), "refresh token echoed into the error");
+        // and a PDS that echoes the access token
+        now -= 120_000;
+        const err2 = await svc.call("class/ATPost", "publish", { text: "y", atAuthor: ALICE, publicationKey: "echo-key-002" }).catch((e) => e);
+        assert.ok(err2 instanceof Error && /400/.test(err2.message), err2.message);
+        assert.ok(!err2.message.includes(access), "access token echoed into the error");
+    });
+
     it("no token, refresh token, verifier or DPoP private key appears in any result, error, signal, log, snapshot or shape", async () => {
         const net = writeNet();
         const { svc, agent, storage } = service(net);

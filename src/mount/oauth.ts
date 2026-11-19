@@ -58,16 +58,19 @@ interface AuthServer {
     revocationEndpoint?: string;
 }
 
-/** A server's error reply, reduced to its OAuth/XRPC error fields. */
-export function serverError(r: HttpResult): string {
+/** A server's error reply, reduced to its OAuth/XRPC error fields, with
+ *  every secret we sent (`secrets`) cut out: a server may quote a request. */
+export function serverError(r: HttpResult, secrets: Array<string | undefined> = []): string {
+    let text = String(r.status);
     try {
         const j = JSON.parse(r.body);
         const parts = [j?.error, j?.error_description ?? j?.message].filter((x) => typeof x === "string");
-        if (parts.length) return `${r.status} ${parts.join(": ").slice(0, 200)}`;
+        if (parts.length) text = `${r.status} ${parts.join(": ")}`;
     } catch {
         // not JSON: the status alone
     }
-    return String(r.status);
+    for (const s of secrets) if (s && s.length >= 8) text = text.split(s).join("<redacted>");
+    return text.slice(0, 200);
 }
 
 export class OAuthClient {
@@ -191,14 +194,16 @@ export class OAuthClient {
     }
 
     /** Check a token response for `account` and turn it into a session. */
-    private sessionFrom(r: HttpResult, account: string, base: Omit<Session, "accessToken" | "refreshToken" | "expiresAt" | "scope">, what: string): Session {
+    private sessionFrom(r: HttpResult, account: string, base: Omit<Session, "accessToken" | "refreshToken" | "expiresAt" | "scope">, what: string, sent: Array<string | undefined>): Session {
         let t: any = null;
         try {
             t = JSON.parse(r.body);
         } catch {
             // handled below
         }
-        if (r.status !== 200 || typeof t?.access_token !== "string") throw new OAuthError(`${what} refused: ${serverError(r)}`);
+        if (r.status !== 200 || typeof t?.access_token !== "string") {
+            throw new OAuthError(`${what} refused: ${serverError(r, [...sent, t?.access_token, t?.refresh_token])}`);
+        }
         if (typeof t.token_type !== "string" || t.token_type.toLowerCase() !== "dpop") {
             throw new OAuthError(`${what}: token type ${JSON.stringify(t.token_type)} is not DPoP`);
         }
@@ -266,7 +271,7 @@ export class OAuthClient {
             session = this.sessionFrom(r, pending.account, {
                 account: pending.account, issuer: pending.issuer, pds: pending.pds, tokenEndpoint: pending.tokenEndpoint,
                 revocationEndpoint: pending.revocationEndpoint, clientId: pending.clientId, dpopJwk: pending.dpopJwk,
-            }, "token request");
+            }, "token request", [code, pending.verifier]);
             // account check: the account's PDS must name this issuer now
             const now = await this.authServerOf(pending.account);
             if (now.as !== pending.issuer) {
@@ -304,7 +309,7 @@ export class OAuthClient {
                 throw new OAuthError(`${account}: the refresh token was refused: authorize again (not authorized)`);
             }
             const { accessToken: _a, refreshToken: _r, expiresAt: _e, scope: _s, ...base } = session;
-            session = this.sessionFrom(r, account, base, "token refresh");
+            session = this.sessionFrom(r, account, base, "token refresh", [session.refreshToken, session.accessToken]);
             await this.opts.vault.putSession(session);
         }
         return { session, key };
