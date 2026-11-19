@@ -121,13 +121,32 @@ export class FakeDisk {
     files = new Map<string, string>();
     temps: string[] = [];
     atomic = true;
+    /** the host offers createStorageFileExclusive / removeStorageFile */
+    exclusive = true;
     failWrite: ((name: string, content: string) => boolean) | null = null;
     crashBeforeRename: ((name: string, content: string) => boolean) | null = null;
     writes: Array<{ name: string; content: string }> = [];
 
     api() {
         return {
-            atomic: () => this.atomic,
+            atomic: () => this.atomic && this.exclusive,
+            createExclusive: (name: string, content: string) => {
+                if (!this.exclusive) throw new Error("createStorageFileExclusive is not installed on this runtime");
+                if (this.files.has(name)) {
+                    const e = new Error(`File exists (os error 17): ${name}`);
+                    e.name = "AlreadyExists";
+                    throw e;
+                }
+                this.files.set(name, content);
+            },
+            remove: (name: string) => {
+                if (!this.files.has(name)) {
+                    const e = new Error(`No such file or directory (os error 2): ${name}`);
+                    e.name = "NotFound";
+                    throw e;
+                }
+                this.files.delete(name);
+            },
             read: (name: string) => this.files.get(name) ?? null,
             writeAtomic: (name: string, content: string) => {
                 if (!this.atomic) throw new Error("writeStorageFileAtomic is not installed on this runtime");

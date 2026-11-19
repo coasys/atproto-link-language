@@ -644,6 +644,73 @@ describe("round 3 item 1: no server text crosses the publication boundary", () =
     });
 });
 
+describe("round 3 item 2: one writer at a time per ledger, across processes", () => {
+    const P = { text: TEXT, atAuthor: ALICE, publicationKey: KEY };
+    const attemptsSince = attempts;
+
+    it("two publishers (separate instances, one storage dir) racing one publicationKey make exactly one post", async () => {
+        const { net, svc, agent, storage } = await ready();
+        const { svc: other } = service(net, { agent, storage }); // a second process on the same dir
+        const mark = net.requestsLog.length;
+        const [a, b] = await Promise.allSettled([svc.call("class/ATPost", "publish", P), other.call("class/ATPost", "publish", P)]);
+        assert.equal(a.status, "fulfilled", String((a as any).reason));
+        assert.equal(b.status, "fulfilled", String((b as any).reason));
+        assert.deepEqual((a as any).value, (b as any).value);
+        assert.equal(attemptsSince(net, mark).length, 1, "one createRecord");
+        assert.equal(net.postsWithText(ALICE, TEXT).length, 1, "one post");
+    });
+
+    it("rkeys stay unique across publishers on one dir, even with the same clock id at a frozen clock", async () => {
+        const frozen = new Date(1_795_000_000_000);
+        const sameClock = new Proxy(testCrypto, {
+            get(t, k) {
+                if (k === "getRandomValues") return (a: any) => (a instanceof Uint16Array ? a.fill(0) : t.getRandomValues(a));
+                const v = (t as any)[k];
+                return typeof v === "function" ? v.bind(t) : v;
+            },
+        });
+        const net = writeNet();
+        const h = service(net, { now: () => frozen, crypto: sameClock as any });
+        await h.svc.refresh();
+        await authorize(h.svc, net);
+        const { svc: other } = service(net, { now: () => frozen, crypto: sameClock as any, agent: h.agent, storage: h.storage });
+        const b1 = await other.call("class/ATPost", "publish", { text: "b1", atAuthor: ALICE, publicationKey: "proc-b-key-01" });
+        const a1 = await h.svc.call("class/ATPost", "publish", { text: "a1", atAuthor: ALICE, publicationKey: "proc-a-key-01" });
+        const b2 = await other.call("class/ATPost", "publish", { text: "b2", atAuthor: ALICE, publicationKey: "proc-b-key-02" });
+        const rk = [b1, a1, b2].map((r) => r.address.split("/").pop());
+        assert.equal(new Set(rk).size, 3, `distinct rkeys: ${rk}`);
+        for (const t of ["b1", "a1", "b2"]) assert.equal(net.postsWithText(ALICE, t).length, 1, t);
+    });
+
+    it("a live lock held by another writer: wait, then refuse with no request", async () => {
+        const { net, storage, agent } = await ready();
+        const { svc } = service(net, { agent, storage, lockWaitMs: 300 });
+        storage.disk.files.set(`publish-ledger.${agent.did}.lock`, JSON.stringify({ owner: "someone-else", at: Date.now() }));
+        const mark = net.requestsLog.length;
+        await assert.rejects(svc.call("class/ATPost", "publish", P), /LEDGER_BUSY/);
+        assert.deepEqual(net.requestsLog.slice(mark).map((r) => r.url), []);
+    });
+
+    it("a stale lock (a writer that died) is taken over; the publication proceeds and the lock is released", async () => {
+        const { net, storage, agent } = await ready();
+        const { svc } = service(net, { agent, storage, lockWaitMs: 300 });
+        const lock = `publish-ledger.${agent.did}.lock`;
+        storage.disk.files.set(lock, JSON.stringify({ owner: "dead-writer", at: Date.now() - 3_600_000 }));
+        await svc.call("class/ATPost", "publish", P);
+        assert.equal(net.postsWithText(ALICE, TEXT).length, 1);
+        assert.equal(storage.disk.files.has(lock), false, "released");
+        assert.equal(storage.disk.files.has(`${lock}.takeover`), false);
+    });
+
+    it("a host without exclusive create cannot publish", async () => {
+        const { net, svc, storage } = await ready();
+        storage.disk.exclusive = false;
+        const mark = net.requestsLog.length;
+        await assert.rejects(svc.call("class/ATPost", "publish", P), /NO_ATOMIC_WRITE/);
+        assert.deepEqual(net.requestsLog.slice(mark).map((r) => r.url), []);
+    });
+});
+
 describe("rule 4: read-back by a distinct account's reader", () => {
     it("bob's reader (another agent, no session) shows alice's new post with atAuthor = alice, and bob's follow of alice", async () => {
         const { net, svc } = await ready();

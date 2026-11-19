@@ -127,7 +127,10 @@ class HeaderTransport implements Transport {
  *  without it (acorn a9 c9d4a8de1 as found) cannot publish: the KV's flush
  *  is best effort and its file rewrite is not atomic. */
 const files: DurableFiles = {
-    atomic: () => typeof (host as any).writeStorageFileAtomic === "function" && !!storageDir(),
+    // the atomic write and the ledger lock primitives (round 3 #2) — all on
+    // the local ad4m branch atproto-s2/atomic-storage-write, none in a9
+    atomic: () => ["writeStorageFileAtomic", "createStorageFileExclusive", "removeStorageFile"]
+        .every((f) => typeof (host as any)[f] === "function") && !!storageDir(),
     read: (name) => {
         try {
             return String(readStorageFile(`${storageDir()}/${name}`));
@@ -138,6 +141,8 @@ const files: DurableFiles = {
         }
     },
     writeAtomic: (name, content) => (host as any).writeStorageFileAtomic(`${storageDir()}/${name}`, content),
+    createExclusive: (name, content) => (host as any).createStorageFileExclusive(`${storageDir()}/${name}`, content),
+    remove: (name) => (host as any).removeStorageFile(`${storageDir()}/${name}`),
 };
 
 function storageDir(): string {

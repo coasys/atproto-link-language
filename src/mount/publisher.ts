@@ -30,7 +30,8 @@ import type { WebCrypto } from "./webcrypto.js";
 
 import type { Transport } from "../adapters.js";
 import { TimeoutError, withDeadline } from "./dpop.js";
-import { TidClock } from "./bytes.js";
+import { TidClock, randomB64u } from "./bytes.js";
+import { LedgerBusy, LedgerLock } from "./ledger-lock.js";
 import { postEntry, type MountEntry } from "./mapping.js";
 import { OAuthClient, OAuthError, serverError } from "./oauth.js";
 import { POST_NSID, isTid, readAccount, resolveDid, type AccountRead, type ReaderConfig } from "./reader.js";
@@ -110,9 +111,14 @@ export interface CallDelta {
  *  rename, directory fsync; throws on any failure). `read` returns null
  *  only for a missing file and throws on any other failure. */
 export interface DurableFiles {
+    /** the atomic write AND the lock primitives (exclusive create, remove) exist */
     atomic(): boolean;
     read(name: string): string | null;
     writeAtomic(name: string, content: string): void;
+    /** O_EXCL create; throws an error named AlreadyExists (host createStorageFileExclusive) */
+    createExclusive(name: string, content: string): void;
+    /** throws an error named NotFound (host removeStorageFile) */
+    remove(name: string): void;
 }
 
 export interface PublisherOptions extends ReaderConfig {
@@ -128,6 +134,10 @@ export interface PublisherOptions extends ReaderConfig {
     accounts: string[];
     writeTimeoutMs?: number;
     now?: () => Date;
+    /** a ledger lock older than this belongs to a dead writer (default 5 min) */
+    lockStaleMs?: number;
+    /** how long to wait for another writer's lock (default 30 s) */
+    lockWaitMs?: number;
 }
 
 const KEY = /^[A-Za-z0-9._:~-]{8,128}$/;
@@ -138,6 +148,7 @@ const MAX_BYTES = 3000;
 export const ledgerFiles = {
     entry: (agent: string, key: string) => `publish-ledger.${agent}.${key}.json`,
     index: (agent: string) => `publish-ledger.${agent}.index.json`,
+    lock: (agent: string) => `publish-ledger.${agent}.lock`,
 };
 
 export const ledgerKeys = {
@@ -152,15 +163,19 @@ function graphemes(s: string): number {
 }
 
 export class Publisher {
-    private readonly locks = new Map<string, Promise<unknown>>();
     /** rkeys: monotonic per process, seeded from the ledger on first use */
     private tids: TidClock | null = null;
+    /** one publication at a time in this process; the file lock across processes */
+    private queue: Promise<unknown> = Promise.resolve();
+    private lockHandle: LedgerLock | null = null;
+    private readonly owner: string;
     /** read-back states not yet written (a failed ledger write keeps them here) */
     private readonly readBackMem = new Map<string, "confirmed" | "deleted">();
     private readonly now: () => Date;
 
     constructor(private readonly opts: PublisherOptions) {
         this.now = opts.now ?? (() => new Date());
+        this.owner = randomB64u(opts.crypto, 12);
     }
 
     // ---- ledger (durable files) ----
@@ -224,6 +239,8 @@ export class Publisher {
      *  and finds it, so this is "uncertain", never a reason to resend. */
     private saveOutcome(e: LedgerEntry): void {
         try {
+            // a writer that lost the lock records nothing; the next one reads the PDS
+            if (!this.lock().owned()) throw new Error("lock lost");
             this.save(e);
         } catch (err) {
             throw fail(e.key, "OUTCOME_NOT_RECORDED", { uncertain: true });
@@ -275,33 +292,51 @@ export class Publisher {
     /** A fresh rkey: above every rkey this user's ledger already holds, and
      *  above every one allocated in this process. Synchronous, so
      *  concurrent publications cannot share one. */
+    /** Called under the ledger lock: above every rkey in the ledger as it
+     *  is now (another process may have added some since the last call). */
     private nextRkey(now: Date): string {
-        if (!this.tids) {
-            const clock = new TidClock(this.opts.crypto.getRandomValues(new Uint16Array(1))[0] & 1023);
-            for (const k of this.indexKeys()) {
-                try {
-                    const e = this.ledgerEntry(k);
-                    if (e) clock.observe(e.rkey);
-                } catch {
-                    // unreadable entries are refused when used
-                }
+        if (!this.tids) this.tids = new TidClock(this.opts.crypto.getRandomValues(new Uint16Array(1))[0] & 1023);
+        for (const k of this.indexKeys()) {
+            try {
+                const e = this.ledgerEntry(k);
+                if (e) this.tids.observe(e.rkey);
+            } catch {
+                // unreadable entries are refused when used
             }
-            this.tids = clock;
         }
         return this.tids.next(now.getTime());
+    }
+
+    private lock(): LedgerLock {
+        if (!this.lockHandle) {
+            this.lockHandle = new LedgerLock(this.opts.files!, ledgerFiles.lock(this.opts.agentDid()), this.owner,
+                () => Date.now(), this.opts.lockStaleMs ?? 300_000, this.opts.lockWaitMs ?? 30_000);
+        }
+        return this.lockHandle;
     }
 
     private readBackOf(e: LedgerEntry): LedgerEntry["readBack"] {
         return this.readBackMem.get(e.key) ?? e.readBack;
     }
 
+    /** Persist a read-back state if the ledger lock is free right now (a
+     *  refresh never waits for a publication); otherwise, or on a failed
+     *  write, keep it in memory — the next accepted read sets it again. */
     private markReadBack(e: LedgerEntry, state: "confirmed" | "deleted"): void {
         this.readBackMem.set(e.key, state);
+        if (!this.files()) return;
+        const lock = this.lock();
+        let held = false;
         try {
-            this.save({ ...e, readBack: state });
+            held = lock.tryAcquire();
+            if (!held) return;
+            const now = this.ledgerEntry(e.key);
+            if (now) this.save({ ...now, readBack: state });
             this.readBackMem.delete(e.key);
         } catch {
-            // kept in memory for this run; the next accepted read sets it again
+            // memory only
+        } finally {
+            if (held) lock.release();
         }
     }
 
@@ -387,14 +422,30 @@ export class Publisher {
     // ---- publish ----
 
     /** One publication per key; concurrent calls with one key share it. */
+    /** One publication at a time: in this process through a queue, across
+     *  processes sharing the storage dir through the ledger lock file. A
+     *  published key answers from the ledger without the lock. */
     publish(params: PublishParams): Promise<CallDelta> {
         const { text, atAuthor, publicationKey } = this.validate(params);
-        const prev = this.locks.get(publicationKey) ?? Promise.resolve();
-        const run = prev.catch(() => undefined).then(() => this.publishLocked(text, atAuthor, publicationKey));
-        this.locks.set(publicationKey, run);
-        return run.finally(() => {
-            if (this.locks.get(publicationKey) === run) this.locks.delete(publicationKey);
+        const run = this.queue.catch(() => undefined).then(async () => {
+            const e = this.ledgerEntry(publicationKey);
+            if (e?.state === "published" && e.account === atAuthor && e.text === text) return this.deltaOf(e);
+            if (!this.files()) throw fail(publicationKey, "NO_ATOMIC_WRITE");
+            const lock = this.lock();
+            try {
+                await lock.acquire();
+            } catch (err) {
+                if (err instanceof LedgerBusy) throw fail(publicationKey, "LEDGER_BUSY");
+                throw fail(publicationKey, "LEDGER_WRITE_FAILED");
+            }
+            try {
+                return await this.publishLocked(text, atAuthor, publicationKey);
+            } finally {
+                lock.release();
+            }
         });
+        this.queue = run;
+        return run;
     }
 
     private validate(p: PublishParams): { text: string; atAuthor: string; publicationKey: string } {
@@ -455,6 +506,7 @@ export class Publisher {
 
         e = { ...e, attempts: e.attempts + 1 };
         this.save(e); // the attempt is on record before anything is sent
+        this.lock().touch();
         const uri = `at://${account}/${POST_NSID}/${e.rkey}`;
         const body = JSON.stringify({
             repo: account,
