@@ -242,6 +242,22 @@ describe("P1: a stable read is checked against the last accepted rev, commit and
     });
 });
 
+describe("decision: RepoNotFound is a failed read, not a deletion (spike policy)", () => {
+    it("a repo the PDS no longer knows keeps its records and reports the failure", async () => {
+        const net = standardNet();
+        const r = reader(net);
+        await r.refresh();
+        const before = JSON.stringify(r.snapshot());
+        net.repos.delete(ALICE); // DID document still points at the PDS
+        const report = await r.refresh();
+        const alice = report.accounts.find((a) => a.did === ALICE)!;
+        assert.equal(alice.ok, false);
+        assert.match(alice.error!, /RepoNotFound/);
+        assert.deepEqual(report.delta, { changed: [], removed: [] });
+        assert.equal(JSON.stringify(r.snapshot()), before);
+    });
+});
+
 describe("rule 6: account deactivation hides its records", () => {
     it("hides an inactive account's records and shows them again on reactivation", async () => {
         const net = standardNet();
