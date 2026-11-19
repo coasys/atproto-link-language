@@ -54,11 +54,13 @@ export class LedgerLock {
         if (raw === null) return null;
         try {
             const j = JSON.parse(raw);
-            if (typeof j?.owner === "string" && typeof j?.at === "number") return j;
+            if (typeof j?.owner === "string" && j.owner && typeof j?.at === "number") return j;
         } catch {
-            // unreadable: as old as can be
+            // handled below
         }
-        return { owner: "", at: 0 };
+        // Unreadable or partial: possibly a lock another process is creating.
+        // Held by someone else — never stale, never ours (round 4 #1).
+        return { owner: "", at: Number.POSITIVE_INFINITY };
     }
 
     private tryCreate(name: string): boolean {

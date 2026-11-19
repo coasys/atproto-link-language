@@ -53,11 +53,18 @@ describe("ledger lock edge cases", () => {
         assert.equal(fs.files.has("L.takeover"), false, "the takeover lock is released");
     });
 
-    it("an unreadable lock file counts as stale and is taken over", () => {
-        const fs = memFiles();
-        fs.files.set("L", "\u0000not json");
-        const lock = new LedgerLock(fs, "L", "me", () => NOW);
-        assert.equal(lock.tryAcquire(), true);
-        assert.equal(JSON.parse(fs.files.get("L")!).owner, "me");
+    // Round 4 #1 (Lal r3): this pin asserted the unsafe behaviour. A lock file
+    // that cannot be read may be one another process is still creating; it
+    // is held, never stale — and never removed.
+    it("an unreadable or partial lock file is HELD: not taken over, not removed", () => {
+        for (const content of ["\u0000not json", "", '{"owner":"a', "{}"]) {
+            const fs = memFiles();
+            fs.files.set("L", content);
+            const lock = new LedgerLock(fs, "L", "me", () => NOW);
+            assert.equal(lock.tryAcquire(), false, JSON.stringify(content));
+            assert.equal(fs.files.get("L"), content, "untouched");
+            lock.release();
+            assert.equal(fs.files.get("L"), content, "release leaves it alone");
+        }
     });
 });
