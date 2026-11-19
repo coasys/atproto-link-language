@@ -5,7 +5,9 @@
  * 2^53 (the data model allows 64-bit signed integers) comes back rounded.
  * This parser keeps integers outside the safe range as `LosslessNumber`
  * holding the exact source digits, keeps object key order as received,
- * and `stringifyLossless` writes the same compact JSON back. `$bytes` and
+ * and `stringifyLossless` writes the same compact JSON back. Objects have a
+ * null prototype and own data properties only, so a `__proto__` key is kept
+ * as data and no field can be inherited. `$bytes` and
  * `$link` objects are ordinary objects here — they round-trip as-is.
  *
  * Limitation: keys that look like array indices ("0", "17") are reordered
@@ -32,7 +34,9 @@ export function parseLossless(text: string): unknown {
         const c = text[i];
         if (c === "{") {
             i++;
-            const obj: Record<string, unknown> = {};
+            // Null prototype + defineProperty: a "__proto__" key is data,
+            // and nothing is inherited (no Object.prototype members either).
+            const obj: Record<string, unknown> = Object.create(null);
             ws();
             if (text[i] === "}") {
                 i++;
@@ -45,7 +49,7 @@ export function parseLossless(text: string): unknown {
                 ws();
                 if (text[i] !== ":") fail("expected ':'");
                 i++;
-                obj[k] = value();
+                Object.defineProperty(obj, k, { value: value(), enumerable: true, writable: true, configurable: true });
                 ws();
                 if (text[i] === ",") { i++; continue; }
                 if (text[i] === "}") { i++; return obj; }
