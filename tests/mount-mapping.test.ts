@@ -225,3 +225,42 @@ describe("P3: label recency compares instants, not strings", () => {
         assert.deepEqual(activeLabels(labels, uri, "bafy", now), []);
     });
 });
+
+describe("round 3: object-valued label timestamps are invalid, not fatal", () => {
+    const uri1 = `at://${ALICE}/${POST}/3kalice00001a`;
+
+    async function withLabels(labels: any[]) {
+        const net = standardNet();
+        net.labels = labels;
+        const r = new MountedReader({ ...baseConfig, accounts: [ALICE, BOB], transport: net, now: NOW });
+        const report = await r.refresh();
+        return { report, e: r.snapshot().entries.find((x) => x.data.sourceUri === uri1) };
+    }
+
+    it("an object cts sorts as invalid (oldest) instead of throwing", async () => {
+        const { report, e } = await withLabels([
+            { src: "did:plc:l", uri: uri1, val: "spam", cts: "2026-11-19T10:00:00.000Z" },
+            { src: "did:plc:l", uri: uri1, val: "spam", neg: true, cts: { not: "a time" } },
+        ]);
+        assert.ok(report.accounts.every((a) => a.ok), JSON.stringify(report.accounts));
+        assert.deepEqual(e!.data.activeLabels, ["spam"]);
+        assert.equal(JSON.parse(e!.data.labels as string)[1].cts.not, "a time", "kept as served");
+    });
+
+    it("an object exp is treated as absent instead of throwing", async () => {
+        const { report, e } = await withLabels([
+            { src: "did:plc:l", uri: uri1, val: "!warn", cts: "2026-11-19T10:00:00.000Z", exp: {} },
+        ]);
+        assert.ok(report.accounts.every((a) => a.ok), JSON.stringify(report.accounts));
+        assert.deepEqual(e!.data.activeLabels, ["!warn"]);
+    });
+
+    it("activeLabels itself accepts null-prototype timestamp objects", () => {
+        const o = Object.create(null);
+        const labels: any[] = [
+            { src: "s", uri: uri1, val: "a", cts: o },
+            { src: "s", uri: uri1, val: "a", cts: o, exp: o },
+        ];
+        assert.deepEqual(activeLabels(labels, uri1, "bafy", NOW()), ["a"]);
+    });
+});

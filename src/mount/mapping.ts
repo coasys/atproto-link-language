@@ -51,8 +51,16 @@ function common(rec: RawRecord, did: string): Record<string, unknown> {
     };
 }
 
+/** A label timestamp as epoch ms, or NaN when it is not a parseable
+ *  string. Never coerces: a served object (possibly null-prototype) would
+ *  throw on String(), failing the whole account over one bad label. */
+function timeMs(v: unknown): number {
+    return typeof v === "string" ? Date.parse(v) : NaN;
+}
+
+/** An invalid cts sorts oldest. */
 function ctsMs(l: Label): number {
-    const t = Date.parse(String(l.cts));
+    const t = timeMs(l.cts);
     return Number.isNaN(t) ? -Infinity : t;
 }
 
@@ -73,7 +81,9 @@ export function activeLabels(labels: Label[], uri: string, cid: string, now: Dat
     const out = new Set<string>();
     for (const l of latest.values()) {
         if (l.neg) continue;
-        if (l.exp !== undefined && Date.parse(l.exp) <= now.getTime()) continue;
+        // An invalid exp counts as absent (the label does not expire).
+        const exp = timeMs(l.exp);
+        if (!Number.isNaN(exp) && exp <= now.getTime()) continue;
         out.add(l.val);
     }
     return [...out].sort();
