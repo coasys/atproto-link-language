@@ -311,9 +311,9 @@ describe("round 3: a repo revision must be a valid TID (live and restored)", () 
         const net = standardNet();
         const storage = memStorage();
         await new MountedReader({ ...baseConfig, accounts: [ALICE, BOB], transport: net, now: NOW, storage }).refresh();
-        const key = `mount/accepted/${ALICE}`;
-        const acc = JSON.parse(storage.get(key)!);
-        storage.put(key, JSON.stringify({ ...acc, rev: "z" }));
+        const key = `mount/account/${ALICE}`;
+        const env = JSON.parse(storage.get(key)!);
+        storage.put(key, JSON.stringify({ ...env, accepted: { ...env.accepted, rev: "z" } }));
         const r = new MountedReader({ ...baseConfig, accounts: [ALICE, BOB], transport: net, now: NOW, storage });
         assert.match(r.restoreIssues.get(ALICE) ?? "", /TID/);
         // a valid newer head is accepted (not refused as a regression from "z")
@@ -322,7 +322,72 @@ describe("round 3: a repo revision must be a valid TID (live and restored)", () 
         const alice = report.accounts.find((a) => a.did === ALICE)!;
         assert.equal(alice.ok, true);
         assert.match(alice.warning ?? "", /discarded/);
-        assert.notEqual(JSON.parse(storage.get(key)!).rev, "z", "a fresh baseline replaced it");
+        assert.notEqual(JSON.parse(storage.get(key)!).accepted.rev, "z", "a fresh baseline replaced it");
+    });
+});
+
+describe("round 3: a failed storage write leaves memory and storage in agreement", () => {
+    function failingStorage() {
+        const inner = memStorage();
+        let failOn: ((k: string) => boolean) | null = null;
+        return {
+            ...inner,
+            put: (k: string, v: string) => {
+                if (failOn?.(k)) throw new Error(`disk full writing ${k}`);
+                inner.put(k, v);
+            },
+            failWhen(f: ((k: string) => boolean) | null) { failOn = f; },
+        };
+    }
+
+    for (const [what, match] of [
+        ["every put", () => true],
+        ["every put of this account's keys", (k: string) => k.endsWith(ALICE)],
+    ] as Array<[string, (k: string) => boolean]>) {
+        it(`a throwing ${what} changes nothing in memory and reports the failure`, async () => {
+            const net = standardNet();
+            const storage = failingStorage();
+            const r = new MountedReader({ ...baseConfig, accounts: [ALICE, BOB], transport: net, now: NOW, storage });
+            await r.refresh();
+            const before = JSON.stringify(r.snapshot());
+            net.del(ALICE, POST, "3kalice00002a");
+            storage.failWhen(match);
+            const report = await r.refresh();
+            const alice = report.accounts.find((a) => a.did === ALICE)!;
+            assert.equal(alice.ok, false);
+            assert.match(alice.error!, /storage/);
+            assert.equal(JSON.stringify(r.snapshot()), before, "memory unchanged");
+            assert.deepEqual(report.delta.removed, []);
+            // memory and storage agree: a restart from this storage serves the same snapshot
+            const restarted = new MountedReader({ ...baseConfig, accounts: [ALICE, BOB], transport: net, now: NOW, storage });
+            assert.equal(JSON.stringify(restarted.snapshot()), before);
+            // and once storage works again the deletion goes through
+            storage.failWhen(null);
+            await r.refresh();
+            assert.ok(!recordAddrs(r).includes(`${ALICE}/${POST}/3kalice00002a`));
+        });
+    }
+});
+
+describe("round 3: storage layout compatibility", () => {
+    it("the pre-round-3 two-key layout (entries + mount/accepted) still restores its guard", async () => {
+        const net = standardNet();
+        const storage = memStorage();
+        await new MountedReader({ ...baseConfig, accounts: [ALICE, BOB], transport: net, now: NOW, storage }).refresh();
+        for (const did of [ALICE, BOB]) {
+            const env = JSON.parse(storage.get(`mount/account/${did}`)!);
+            storage.put(`mount/account/${did}`, JSON.stringify(env.entries));
+            storage.put(`mount/accepted/${did}`, JSON.stringify(env.accepted));
+        }
+        const r = new MountedReader({ ...baseConfig, accounts: [ALICE, BOB], transport: net, now: NOW, storage });
+        const before = JSON.stringify(r.snapshot());
+        net.repos.get(ALICE)!.rev = OLDEST_TID; // rollback must still be caught
+        const report = await r.refresh();
+        assert.match(report.accounts.find((a) => a.did === ALICE)!.error ?? "", /regress/);
+        assert.equal(JSON.stringify(r.snapshot()), before);
+        // BOB was re-persisted in the envelope layout; its legacy key is gone
+        assert.equal(storage.get(`mount/accepted/${BOB}`), null);
+        assert.ok(JSON.parse(storage.get(`mount/account/${BOB}`)!).accepted);
     });
 });
 

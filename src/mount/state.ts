@@ -52,6 +52,7 @@ export interface RefreshReport {
 }
 
 const storageKey = (did: string) => `mount/account/${did}`;
+/** pre-round-3 layout only: the accepted head under its own key */
 const acceptedKey = (did: string) => `mount/accepted/${did}`;
 
 /** What the last accepted complete read of an active repo saw: its
@@ -105,29 +106,39 @@ export class MountedReader {
     constructor(opts: MountedReaderOptions) {
         this.opts = opts;
         this.accounts = [...new Set(opts.accounts.map((a) => a.trim()).filter(Boolean))];
-        for (const did of this.accounts) {
-            const raw = opts.storage?.get(storageKey(did));
-            if (!raw) continue;
+        for (const did of this.accounts) this.restore(did);
+    }
+
+    /** Load one account's persisted envelope `{entries, accepted}` (one key,
+     *  so entries and accepted head can never disagree). Accounts persisted
+     *  before round 3 kept two keys; they are still read. A corrupt value is
+     *  ignored; an accepted rev that is not a TID is discarded and reported. */
+    private restore(did: string): void {
+        const parse = (raw: string | null | undefined) => {
+            if (!raw) return undefined;
             try {
-                const entries = JSON.parse(raw);
-                if (Array.isArray(entries)) this.perAccount.set(did, entries);
+                return JSON.parse(raw);
             } catch {
-                // a corrupt cache is ignored; the next complete read replaces it
+                return undefined;
             }
-            const acc = opts.storage?.get(acceptedKey(did));
-            if (!acc) continue;
-            try {
-                const a = JSON.parse(acc);
-                if (!isTid(a?.rev)) {
-                    // A malformed baseline would order every later rev wrongly
-                    // (string comparison is only valid between TIDs).
-                    this.restoreIssues.set(did, `accepted baseline discarded on restore: stored rev ${JSON.stringify(a?.rev)} is not a valid TID`);
-                } else if (typeof a?.commitCid === "string" && a.inventory && typeof a.inventory === "object") {
-                    this.accepted.set(did, { rev: a.rev, commitCid: a.commitCid, inventory: Object.assign(Object.create(null), a.inventory) });
-                }
-            } catch {
-                // as above
-            }
+        };
+        const stored = parse(this.opts.storage?.get(storageKey(did)));
+        let entries: unknown, a: any;
+        if (Array.isArray(stored)) {
+            entries = stored; // pre-round-3 layout
+            a = parse(this.opts.storage?.get(acceptedKey(did)));
+        } else if (stored && typeof stored === "object") {
+            entries = stored.entries;
+            a = stored.accepted;
+        }
+        if (Array.isArray(entries)) this.perAccount.set(did, entries as MountEntry[]);
+        if (!a) return;
+        if (!isTid(a.rev)) {
+            // A malformed baseline would order every later rev wrongly
+            // (string comparison is only valid between TIDs).
+            this.restoreIssues.set(did, `accepted baseline discarded on restore: stored rev ${JSON.stringify(a.rev)} is not a valid TID`);
+        } else if (typeof a.commitCid === "string" && a.inventory && typeof a.inventory === "object") {
+            this.accepted.set(did, { rev: a.rev, commitCid: a.commitCid, inventory: Object.assign(Object.create(null), a.inventory) });
         }
     }
 
@@ -164,15 +175,29 @@ export class MountedReader {
                 const postUris = read.records.filter((r) => r.collection === POST_NSID).map((r) => r.uri);
                 const labels = read.active && postUris.length ? await fetchLabels(postUris, this.opts.transport, this.opts) : null;
                 const entries = entriesFor(read, labels, now);
-                this.perAccount.set(did, entries);
-                this.opts.storage?.put(storageKey(did), JSON.stringify(entries));
                 // An inactive read hides records but keeps the accepted
                 // head, so a regression is still caught on reactivation.
-                if (read.active && read.rev !== undefined && read.commitCid !== undefined) {
-                    const acc: Accepted = { rev: read.rev, commitCid: read.commitCid, inventory: inventoryOf(read) };
-                    this.accepted.set(did, acc);
-                    this.opts.storage?.put(acceptedKey(did), JSON.stringify(acc));
+                const acc: Accepted | undefined = read.active && read.rev !== undefined && read.commitCid !== undefined
+                    ? { rev: read.rev, commitCid: read.commitCid, inventory: inventoryOf(read) }
+                    : this.accepted.get(did);
+                // Storage first, as ONE put: memory changes only once the
+                // envelope is stored, so a failed write leaves both as they were.
+                if (this.opts.storage) {
+                    try {
+                        this.opts.storage.put(storageKey(did), JSON.stringify({ v: 2, entries, ...(acc ? { accepted: acc } : {}) }));
+                    } catch (e) {
+                        throw new ReadError(`${did}: storage write failed, nothing changed: ${(e as Error).message ?? e}`);
+                    }
+                    // Best effort: a stale pre-round-3 key is ignored once
+                    // the envelope exists, so a failure here changes nothing.
+                    try {
+                        this.opts.storage.delete?.(acceptedKey(did));
+                    } catch {
+                        // ignored
+                    }
                 }
+                this.perAccount.set(did, entries);
+                if (acc) this.accepted.set(did, acc);
                 const warning = this.restoreIssues.get(did);
                 if (read.active && this.accepted.has(did)) this.restoreIssues.delete(did);
                 accounts.push({
