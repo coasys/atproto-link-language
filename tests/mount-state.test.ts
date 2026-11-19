@@ -389,6 +389,20 @@ describe("round 3: storage layout compatibility", () => {
         assert.equal(storage.get(`mount/accepted/${BOB}`), null);
         assert.ok(JSON.parse(storage.get(`mount/account/${BOB}`)!).accepted);
     });
+
+    it("the envelope's accepted head wins over a leftover legacy mount/accepted key", async () => {
+        // The legacy key is deleted best-effort after an envelope write; if that
+        // delete failed, a stale key must not become the restored baseline.
+        const net = standardNet();
+        const storage = memStorage();
+        await new MountedReader({ ...baseConfig, accounts: [ALICE, BOB], transport: net, now: NOW, storage }).refresh();
+        const env = JSON.parse(storage.get(`mount/account/${ALICE}`)!);
+        storage.put(`mount/accepted/${ALICE}`, JSON.stringify({ ...env.accepted, commitCid: "bafySTALELEGACY" }));
+        const r = new MountedReader({ ...baseConfig, accounts: [ALICE, BOB], transport: net, now: NOW, storage });
+        const report = await r.refresh();
+        const alice = report.accounts.find((a) => a.did === ALICE)!;
+        assert.equal(alice.ok, true, alice.error);
+    });
 });
 
 describe("decision: RepoNotFound is a failed read, not a deletion (spike policy)", () => {
