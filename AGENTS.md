@@ -102,3 +102,35 @@ rendering in Bluesky**.
   `/^[234567abcdefghij][234567a-z]{12}$/`). Verified live: the projected record
   is written via `applyWrites#create` and read back natively via
   `com.atproto.repo.getRecord` / `listRecords` as a clean post (no ad4m envelope).
+
+## Mounted reader (spike, `spike/mounted-reader`)
+
+A second, independent, **read-only** entry point: `mount-index.ts`. It does
+not touch `index.ts`, Role A/B, `src/mst.ts`, the OR-set, the projection or
+app-password auth. It needs the Acorn A-step executor stack
+(`coasys/ad4m` `acorn/a9-mount-lifecycle`; plain `dev` has no mount API) and
+that stack's LDK (`mount` capability).
+
+- `src/mount/reader.ts` — DID resolution (did:plc via PLC, hostname
+  did:web), `getRepoStatus`, revision-pinned `listRecords` inventory
+  (all-or-nothing), AppView `getPosts` labels.
+- `src/mount/mapping.ts` — records → mount entries; address =
+  `<did>/<collection>/<rkey>`; lossless `sourceRecord`; `atAuthor`.
+- `src/mount/shapes.ts` — read-only `ATPost` / `ATFollow` / `ATAccount`.
+- `src/mount/state.ts` — last complete inventory per account (persisted in
+  host KV); a failed read never removes anything.
+- `src/mount/lossless-json.ts` — integers beyond 2^53 survive.
+- `mount-build.mjs` → `build/mount/bundle.js`; template variables
+  `ACCOUNTS`, `PLC_URL`, `APPVIEW_URL`, `POLL_MS` live in the banner.
+
+```bash
+node mount-build.mjs                    # MOUNT_LDK_ENTRY overrides ../ad4m-acorn/ad4m-ldk/js/lib/index.js
+npx tsc --noEmit -p tsconfig.mount.json
+node --import tsx --test tests/mount-*.test.ts            # hermetic
+(cd live && npm install)                                  # Node >= 22
+MOUNT_LIVE=1 AD4M_EXECUTOR=<acorn executor> \
+  node --import tsx --test --test-concurrency=1 tests/mount-live.test.ts
+```
+
+The live test starts a local PLC + PDS (`live/pds.mjs`, @atproto/dev-env,
+two fresh accounts) and an executor on a temp data dir, and stops both.
