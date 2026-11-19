@@ -164,16 +164,17 @@ export async function readAccount(did: string, transport: Transport, cfg: Reader
     const acct = await resolveDid(did, transport, cfg);
     const xrpc = (m: string, params: Record<string, string | undefined>) => `${acct.pds}/xrpc/${m}?${q(params)}`;
 
-    const desc = await getJson(transport, xrpc("com.atproto.repo.describeRepo", { repo: did }), cfg);
-    if (desc?.did !== did) throw new ReadError(`describeRepo on ${acct.pds} answered for ${JSON.stringify(desc?.did)}, not ${did}`);
-
     const status = await getJson(transport, xrpc("com.atproto.sync.getRepoStatus", { did }), cfg);
     if (status?.did !== did || typeof status?.active !== "boolean") throw new ReadError(`getRepoStatus for ${did}: malformed answer`);
     if (!status.active) {
         // Deactivated / taken down / suspended: a complete answer — the
         // account has no visible records right now.
+        // (Status first: a PDS refuses describeRepo for an inactive repo.)
         return { ...acct, active: false, status: typeof status.status === "string" ? status.status : "inactive", records: [] };
     }
+
+    const desc = await getJson(transport, xrpc("com.atproto.repo.describeRepo", { repo: did }), cfg);
+    if (desc?.did !== did) throw new ReadError(`describeRepo on ${acct.pds} answered for ${JSON.stringify(desc?.did)}, not ${did}`);
 
     const head = async () => {
         const c = await getJson(transport, xrpc("com.atproto.sync.getLatestCommit", { did }), cfg);

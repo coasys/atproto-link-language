@@ -206,6 +206,8 @@ export class FakeNet implements Transport {
         if (!repo || repo.pds !== u.origin) return err(400, "RepoNotFound");
         switch (xrpc) {
             case "com.atproto.repo.describeRepo":
+                // a real PDS (0.5.x) refuses describeRepo for an inactive repo
+                if (!repo.active) return err(400, "RepoDeactivated");
                 return ok(JSON.stringify({ did: repo.did, handle: repo.handle, handleIsCorrect: true, collections: [...repo.collections.keys()] }));
             case "com.atproto.sync.getRepoStatus":
                 return ok(JSON.stringify({ did: repo.did, active: repo.active, ...(repo.status ? { status: repo.status } : {}), rev: repo.rev }));

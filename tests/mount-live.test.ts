@@ -82,7 +82,9 @@ async function startExecutor(first: boolean) {
     exeProc = spawn(EXECUTOR, [
         "run", "-a", data, "--port", String(AD4M_PORT), "--localhost", "true",
         "--insecure-no-admin-credential", "--hc-use-proxy", "false",
-        "--hc-use-bootstrap", "false", "--run-dapp-server", "false", "--enable-mcp", "false",
+        "--hc-use-bootstrap", "false", "--hc-use-mdns", "false",
+        "--hc-admin-port", String(AD4M_PORT + 1), "--hc-app-port", String(AD4M_PORT + 2),
+        "--run-dapp-server", "false", "--enable-mcp", "false", "--exit-with-parent", "true",
     ], { stdio: ["ignore", log, log], env: { ...process.env, RUST_LOG: process.env.RUST_LOG ?? "info" } });
     await waitFor("executor health", async () => (await fetch(`http://127.0.0.1:${AD4M_PORT}/health`)).ok, 120000);
     rpcClose();
@@ -191,13 +193,13 @@ function publishLocal(bundlePath: string): string {
 // ---- PDS (outside the connector) -------------------------------------------
 
 const tokens = new Map<string, string>();
-async function pdsCall(method: string, opts: { did?: string; body?: unknown; query?: Record<string, string> } = {}) {
+async function pdsCall(method: string, opts: { did?: string; body?: unknown; post?: boolean; query?: Record<string, string> } = {}) {
     const q = opts.query ? "?" + new URLSearchParams(opts.query).toString() : "";
     const headers: Record<string, string> = {};
     if (opts.did) headers.authorization = `Bearer ${tokens.get(opts.did)}`;
     if (opts.body) headers["content-type"] = "application/json";
     const res = await fetch(`${env.pdsUrl}/xrpc/${method}${q}`, {
-        method: opts.body ? "POST" : "GET", headers, body: opts.body ? JSON.stringify(opts.body) : undefined,
+        method: opts.body || opts.post ? "POST" : "GET", headers, body: opts.body ? JSON.stringify(opts.body) : undefined,
     });
     const text = await res.text();
     if (!res.ok) throw new Error(`${method} -> ${res.status} ${text}`);
@@ -385,52 +387,44 @@ describe("mounted reader — live acceptance", { skip: !LIVE && "set MOUNT_LIVE=
         assert.ok(posts.some((p) => p.atAuthor === alice.did));
         const accts = await modelQuery("ATAccount");
         assert.equal(accts.find((a) => a.did === bob.did).active, false);
-        await pdsCall("com.atproto.server.activateAccount", { did: bob.did, body: {} });
+        await pdsCall("com.atproto.server.activateAccount", { did: bob.did, post: true });
         await refreshAndSync();
         const back = await modelQuery("ATPost");
         assert.ok(back.some((p) => p.atAuthor === bob.did), "bob's posts back");
         record("rule6_deactivation", { report, accounts: accts });
     });
 
+    it("rule 6: unmount removes connector links but keeps annotations; remount restores", async () => {
+        const notesBefore = await notes();
+        const linksBefore = (await connectorLinks()).map(key).sort();
+        await rpc("perspective.unmount", { uuid, languageAddress: L });
+        assert.deepEqual(await connectorLinks(), [], "no connector links after unmount");
+        assert.deepEqual(await notes(), notesBefore);
+        await rpc("perspective.mount", { uuid, languageAddress: L }, 300000);
+        const linksAfter = (await connectorLinks()).map(key).sort();
+        assert.deepEqual(linksAfter, linksBefore);
+        assert.deepEqual(await notes(), notesBefore);
+        record("unmount_remount", { connectorLinks: linksBefore.length, notes: notesBefore });
+    });
+
+    it("restart the executor (PDS up) and remount: a fresh read gives the same links", async () => {
+        const r = await restartAndRemount();
+        assert.ok(r.refresh.accounts.every((a: any) => a.ok), "a real PDS read after the restart");
+        record("restart_pds_up", r);
+    });
+
     it("rule 5 live: a refresh against an unreachable PDS removes nothing", async () => {
         const before = (await connectorLinks()).map(key).sort();
-        // stop the PDS: every read fails
         await stop(pdsProc, "pds-for-outage");
         const { report, sync } = await refreshAndSync();
         assert.ok(report.accounts.every((a: any) => !a.ok));
         assert.deepEqual((await connectorLinks()).map(key).sort(), before);
         record("rule5_outage", { report, sync });
-        await startPdsAgain();
     });
 
-    it("rule 6: unmount removes connector links but keeps annotations; remount restores", async () => {
-        const notesBefore = (await allLinks()).filter((l) => l.data.predicate === NOTE).map(key).sort();
-        const linksBefore = (await connectorLinks()).map(key).sort();
-        await rpc("perspective.unmount", { uuid, languageAddress: L });
-        assert.deepEqual(await connectorLinks(), [], "no connector links after unmount");
-        assert.deepEqual((await allLinks()).filter((l) => l.data.predicate === NOTE).map(key).sort(), notesBefore);
-        await rpc("perspective.mount", { uuid, languageAddress: L }, 300000);
-        const linksAfter = (await connectorLinks()).map(key).sort();
-        assert.deepEqual(linksAfter, linksBefore);
-        assert.deepEqual((await allLinks()).filter((l) => l.data.predicate === NOTE).map(key).sort(), notesBefore);
-        record("unmount_remount", { connectorLinks: linksBefore.length, notes: notesBefore });
-    });
-
-    it("restart the executor and remount: no duplicates, no lost annotations, no leaked credentials", async () => {
-        const linksBefore = (await connectorLinks()).map(key).sort();
-        const notesBefore = (await allLinks()).filter((l) => l.data.predicate === NOTE).map(key).sort();
-        rpcClose();
-        await stop(exeProc, "executor-restart");
-        await startExecutor(false);
-        await waitFor("mount restored", async () => (await connectorLinks()).length >= linksBefore.length, 180000, 3000);
-        await refreshAndSync();
-        assert.deepEqual((await connectorLinks()).map(key).sort(), linksBefore);
-        await rpc("perspective.unmount", { uuid, languageAddress: L });
-        await rpc("perspective.mount", { uuid, languageAddress: L }, 300000);
-        const after = (await connectorLinks()).map(key).sort();
-        assert.deepEqual(after, linksBefore);
-        assert.equal(new Set(after).size, after.length);
-        assert.deepEqual((await allLinks()).filter((l) => l.data.predicate === NOTE).map(key).sort(), notesBefore);
+    it("restart the executor with the PDS down: the persisted snapshot is kept; no leaked credentials", async () => {
+        const r = await restartAndRemount();
+        assert.ok(r.refresh.accounts.every((a: any) => !a.ok), "PDS still down after the restart");
 
         // credentials: neither account password nor any session token
         // appears anywhere in the executor's data dir or log
@@ -445,13 +439,39 @@ describe("mounted reader — live acceptance", { skip: !LIVE && "set MOUNT_LIVE=
             }
         }
         assert.deepEqual(hits, [], "credentials leaked into executor state");
-        record("restart", { links: after.length, notes: notesBefore, credentialHits: hits });
+        record("restart_pds_down", { ...r, credentialHits: hits, secretsChecked: secrets.length });
     });
 });
 
-async function startPdsAgain() {
-    // The PDS keeps its state in memory only, so an outage test cannot
-    // restart the same accounts. Instead the outage test runs against a
-    // stopped PDS and the remaining tests only touch the executor.
-    record("pds_after_outage", "not restarted (in-memory network); later steps use executor state only");
+async function notes() {
+    return (await allLinks()).filter((l) => l.data.predicate === NOTE).map(key).sort();
+}
+
+/** Stop and restart the executor on the same data dir, wait for the reader
+ *  and the mount to come back, refresh, then unmount + mount again. Each
+ *  step must leave the connector links and the annotations exactly as
+ *  they were. */
+async function restartAndRemount() {
+    const linksBefore = (await connectorLinks()).map(key).sort();
+    const notesBefore = await notes();
+    rpcClose();
+    await stop(exeProc, "executor-restart");
+    await startExecutor(false);
+    // load_installed_languages reloads the templated bundle after the agent
+    // unlocks; restore_mounts then activates the mount (it polls every 5 s)
+    // and syncMount is refused until it has
+    const t0 = Date.now();
+    await waitFor("reader reloaded", async () => !!(await interact(`${L}://project`, "status")), 180000, 2000);
+    await waitFor("mount re-activated", async () => !!(await rpc("perspective.syncMount", { uuid, languageAddress: L }, 60000)), 180000, 2000);
+    const reactivatedMs = Date.now() - t0;
+    assert.deepEqual((await connectorLinks()).map(key).sort(), linksBefore, "restore changed nothing");
+    const { report: refresh, sync } = await refreshAndSync();
+    assert.deepEqual((await connectorLinks()).map(key).sort(), linksBefore, "refresh after restart changed nothing");
+    await rpc("perspective.unmount", { uuid, languageAddress: L });
+    await rpc("perspective.mount", { uuid, languageAddress: L }, 300000);
+    const after = (await connectorLinks()).map(key).sort();
+    assert.deepEqual(after, linksBefore, "remount after restart changed nothing");
+    assert.equal(new Set(after).size, after.length, "no duplicate links");
+    assert.deepEqual(await notes(), notesBefore, "annotations kept");
+    return { reactivatedMs, links: after.length, notes: notesBefore.length, refresh, sync };
 }
