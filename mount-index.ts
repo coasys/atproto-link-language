@@ -79,18 +79,10 @@ const MAX_REPLY_BYTES = 1024 * 1024;
  *  `httpFetch` does not return, so they use the isolate's `fetch` — the same
  *  global `httpFetch` wraps — with the same kind of bounds: a deadline and a
  *  reply cap. Redirects are not followed (a DPoP proof is bound to its URL,
- *  and credentials must not follow a redirect). Errors name only method and
- *  origin + path: never a header or body (tokens, verifier). */
+ *  and credentials must not follow a redirect). Errors name only the method:
+ *  never a URL, header or body. */
 class HeaderTransport implements Transport {
     async fetch(url: string, method: string, headers: Record<string, string>, body: string): Promise<TransportResponse> {
-        const where = (() => {
-            try {
-                const u = new URL(url);
-                return `${u.origin}${u.pathname}`;
-            } catch {
-                return "<unparseable url>";
-            }
-        })();
         const signal = AbortSignal.timeout(WRITE_TIMEOUT_MS + 2_000);
         let res: Response;
         try {
@@ -99,7 +91,8 @@ class HeaderTransport implements Transport {
                 ...(method !== "GET" && method !== "HEAD" && body ? { body } : {}),
             });
         } catch {
-            throw new Error(`${method} ${where} failed${signal.aborted ? ": timed out" : " (network error)"}`);
+            // no URL: the PDS endpoint comes from a DID document (round 3 #1)
+            throw new Error(`${method} failed${signal.aborted ? ": timed out" : " (network error)"}`);
         }
         const out: Record<string, string> = {};
         res.headers.forEach((v, k) => (out[k.toLowerCase()] = v));
@@ -113,7 +106,7 @@ class HeaderTransport implements Transport {
                 total += step.value.byteLength;
                 if (total > MAX_REPLY_BYTES) {
                     reader.cancel().catch(() => {});
-                    throw new Error(`${method} ${where}: reply larger than ${MAX_REPLY_BYTES} bytes`);
+                    throw new Error(`${method}: reply larger than ${MAX_REPLY_BYTES} bytes`);
                 }
                 chunks.push(step.value);
             }

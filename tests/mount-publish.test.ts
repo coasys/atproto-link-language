@@ -11,7 +11,7 @@ import { PublishError } from "../src/mount/publisher.js";
 import { mountShapes } from "../src/mount/shapes.js";
 import { isTid } from "../src/mount/reader.js";
 import { newTid, TidClock } from "../src/mount/bytes.js";
-import { CAROL, FOLLOW, PLC, followOf, plainPost } from "./mount-fixtures.js";
+import { CAROL, FOLLOW, PDS, PLC, followOf, plainPost } from "./mount-fixtures.js";
 import { ALICE, BOB, CrashError, FakeAgent, MemStorage, POST, SCOPE, testCrypto, writeNet, type FakeWriteNet } from "./mount-write-fixtures.js";
 import { ledgerFiles } from "../src/mount/publisher.js";
 
@@ -346,7 +346,8 @@ describe("round 2 item 2: the ledger is written atomically and acknowledged befo
         const rkey = JSON.parse(before).rkey;
         // the retry finds the record and crashes while recording "published"
         storage.disk.crashBeforeRename = (_n, c) => c.includes('"state":"published"');
-        await assert.rejects(svc.call("class/ATPost", "publish", P), (e: unknown) => e instanceof CrashError || /crashed/.test(String(e)));
+        // round 3 #1: the boundary reports a fixed code, not the crash's text
+        await assert.rejects(svc.call("class/ATPost", "publish", P), /OUTCOME_NOT_RECORDED/);
         assert.equal(storage.disk.files.get(ledgerFiles.entry(agent.did, KEY)), before, "the old entry is intact");
         const { svc: restarted } = service(net, { agent, storage });
         const mark = net.requestsLog.length;
@@ -542,6 +543,104 @@ describe("round 2 item 5: rkeys come from a monotonic TID allocator", () => {
         const last = after.address.split("/").pop()!;
         assert.ok(rkeys.every((r) => r < last), "above every rkey already in the ledger");
         for (let i = 0; i < 20; i++) assert.equal(net.postsWithText(ALICE, `post ${i}`).length, 1);
+    });
+});
+
+describe("round 3 item 1: no server text crosses the publication boundary", () => {
+    const P = { text: TEXT, atAuthor: ALICE, publicationKey: KEY };
+    const SECRET = "sekr1tvalue" + "x".repeat(20);
+    const isStatus = (u: string) => u.includes("com.atproto.sync.getRepoStatus");
+    const isList = (u: string) => u.includes("com.atproto.repo.listRecords") && u.includes(encodeURIComponent(POST));
+
+    /** run `body` capturing console output; return every message, stack and log line */
+    async function capture(body: (seen: string[]) => Promise<void>): Promise<string[]> {
+        const seen: string[] = [];
+        const methods = ["log", "info", "warn", "error", "debug"] as const;
+        const orig = methods.map((m) => console[m]);
+        methods.forEach((m) => (console[m] = (...a: unknown[]) => void seen.push(a.map(String).join(" "))));
+        try {
+            await body(seen);
+        } finally {
+            methods.forEach((m, i) => (console[m] = orig[i]));
+        }
+        return seen;
+    }
+    const failure = async (seen: string[], p: Promise<unknown>) => {
+        await p.then(() => assert.fail("expected a rejection"), (e) => void seen.push(String((e as Error).message), String((e as Error).stack)));
+    };
+    function assertClean(seen: string[], storage: MemStorage, secrets: string[]) {
+        const all = [...seen, storage.dump(), ...[...storage.disk.files].map(([k, v]) => `${k}=${v}`)].join("\n");
+        for (const x of secrets) assert.ok(!all.includes(x), `leaked ${x.slice(0, 12)}…`);
+    }
+
+    it("a PDS echoing the first create's access token in a 500 body (getRepoStatus) or in a listed URI on the retry", async () => {
+        for (const how of ["status500", "listedUri"]) {
+            const { net, svc, storage } = await ready();
+            net.writeFaults.push({ kind: "commitThenHang" });
+            const seen = await capture(async (seen) => {
+                await failure(seen, svc.call("class/ATPost", "publish", P));
+                const token = net.issued[0];
+                if (how === "status500") net.faults.push({ match: isStatus, status: 500, body: JSON.stringify({ error: "InternalServerError", message: `bad token ${token}` }) + token, once: true });
+                // a malformed listed URI (the reader rejects it, quoting it)
+                else net.faults.push({ match: isList, status: 200, body: JSON.stringify({ records: [{ uri: `at://${token}/${POST}/3kaaaaaaaaa2a`, cid: "bafyx", value: {} }] }), once: true });
+                await failure(seen, svc.call("class/ATPost", "publish", P));
+            });
+            assert.ok(seen.some((m) => /RECONCILE_READ_FAILED/.test(m)), `${how}: a fixed code`);
+            assertClean(seen, storage, [net.issued[0], net.issued[1]]);
+        }
+    });
+
+    it("a transport error quoting a secret, and a PDS URL holding one, stay out of publish errors", async () => {
+        const { net, svc, storage } = await ready();
+        const orig = net.fetch.bind(net);
+        let thrown = false;
+        net.fetch = async (url, method, headers, body) => {
+            if (!thrown && url.includes("createRecord")) {
+                thrown = true;
+                throw new Error(`POST ${url} failed: ${SECRET} ${headers.Authorization ?? ""}`);
+            }
+            return orig(url, method, headers, body);
+        };
+        const seen = await capture(async (seen) => {
+            await failure(seen, svc.call("class/ATPost", "publish", P));
+            // the account "moves" to a PDS whose URL holds a secret
+            net.didDocs.set(ALICE, net.docFor(ALICE, "alice.test", `https://${SECRET}.test`));
+            await failure(seen, svc.call("class/ATPost", "publish", { ...P, publicationKey: "moved-key-001" }));
+            // and DID resolution failing on a document that names a secret id
+            net.didDocs.set(ALICE, { id: `did:plc:${SECRET}`, service: [] });
+            await failure(seen, svc.call("class/ATPost", "publish", { ...P, publicationKey: "moved-key-002" }));
+        });
+        assert.ok(seen.some((m) => /CREATE_UNCERTAIN/.test(m)));
+        assert.ok(seen.some((m) => /ACCOUNT_MOVED/.test(m)));
+        assert.ok(seen.some((m) => /ACCOUNT_UNRESOLVED/.test(m)));
+        assertClean(seen, storage, [SECRET, ...net.issued]);
+    });
+
+    it("discovery values (authorization server URL, issuer, endpoints) are not repeated in authorize errors", async () => {
+        const breaks: Array<(n: FakeWriteNet) => void> = [
+            (n) => n.prm.set(PDS, { resource: PDS, authorization_servers: [`${PDS}/${SECRET}`] }),
+            (n) => (n.asMeta.issuer = `https://${SECRET}.test`),
+            (n) => (n.asMeta.token_endpoint = `https://${SECRET}.test/oauth/token`),
+            (n) => n.prm.set(PDS, { resource: `https://${SECRET}.test`, authorization_servers: [PDS] }),
+            (n) => n.prm.set(PDS, { resource: PDS, authorization_servers: [`http://${SECRET}.test`] }),
+        ];
+        for (const b of breaks) {
+            const net = writeNet();
+            b(net);
+            const { svc, storage } = service(net);
+            const seen = await capture(async (seen) => failure(seen, svc.call("project", "authorize", { account: ALICE })));
+            assertClean(seen, storage, [SECRET]);
+        }
+    });
+
+    it("a refresh whose getRepoStatus answers 500 with a secret in the body reports no body text", async () => {
+        const { net, svc, storage } = await ready();
+        net.faults.push({ match: isStatus, status: 500, body: JSON.stringify({ error: "InternalServerError", message: SECRET }) + SECRET, once: true });
+        const seen = await capture(async (seen) => {
+            const r = await svc.refresh();
+            seen.push(JSON.stringify(r), JSON.stringify(await svc.call("project", "status")));
+        });
+        assertClean(seen, storage, [SECRET]);
     });
 });
 

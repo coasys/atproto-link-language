@@ -13,6 +13,7 @@
  */
 
 import type { Transport } from "../adapters.js";
+import { serverError } from "./errors.js";
 import { parseLossless, stringifyLossless } from "./lossless-json.js";
 
 export const POST_NSID = "app.bsky.feed.post";
@@ -106,7 +107,8 @@ async function getText(transport: Transport, url: string, cfg: ReaderConfig): Pr
         what,
     );
     if (res.status < 200 || res.status > 299) {
-        throw new ReadError(`${what} -> ${res.status}${res.status === 429 ? " (rate limited)" : ""}: ${String(res.body).slice(0, 200)}`);
+        // no body excerpt: a server may echo a secret it saw (round 3 #1)
+        throw new ReadError(`${what} -> ${serverError({ status: res.status, body: String(res.body) })}${res.status === 429 ? " (rate limited)" : ""}`);
     }
     return res.body;
 }

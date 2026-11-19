@@ -29,17 +29,44 @@
 import type { WebCrypto } from "./webcrypto.js";
 
 import type { Transport } from "../adapters.js";
-import { withDeadline } from "./dpop.js";
+import { TimeoutError, withDeadline } from "./dpop.js";
 import { TidClock } from "./bytes.js";
 import { postEntry, type MountEntry } from "./mapping.js";
-import { OAuthClient, serverError } from "./oauth.js";
+import { OAuthClient, OAuthError, serverError } from "./oauth.js";
 import { POST_NSID, isTid, readAccount, resolveDid, type AccountRead, type ReaderConfig } from "./reader.js";
 import type { StorageLike } from "./vault.js";
 
 export class PublishError extends Error {
-    constructor(message: string, readonly uncertain = false) {
+    constructor(message: string, readonly uncertain = false, readonly code = "INVALID_REQUEST") {
         super(message);
     }
+}
+
+/** The fixed sentence for every failure that crosses the publication
+ *  boundary (round 3 #1). The message is `publication <key>: <CODE>:
+ *  <sentence>`, plus at most a detail built here from local facts or an
+ *  allowlisted protocol identifier — never a server's text, a URL or an
+ *  inner error's message. */
+const SENTENCES = {
+    LEDGER_UNREADABLE: "the ledger entry is unreadable; nothing was sent",
+    NO_ATOMIC_WRITE: "this executor has no atomic durable storage write (host writeStorageFileAtomic): publishing is disabled; nothing was sent",
+    LEDGER_WRITE_FAILED: "the ledger write failed; nothing was sent after it",
+    LEDGER_BUSY: "another writer holds this ledger; nothing was sent — retry later",
+    OUTCOME_NOT_RECORDED: "the post was created but the ledger could not record it — retry with the same publicationKey; it reads the account's posts first",
+    NOT_AUTHORIZED: "the account is not authorized for this executor user: run authorize (again); nothing was sent",
+    AUTH_FAILED: "the account's authorization could not be used; nothing was sent",
+    ACCOUNT_UNRESOLVED: "the account's DID could not be resolved to a PDS; nothing was sent",
+    ACCOUNT_MOVED: "the account's DID names another PDS than the authorized one: authorize again; nothing was sent",
+    CREATE_UNCERTAIN: "outcome uncertain: createRecord may have been applied; nothing is sent again before the account's posts are read — retry with the same publicationKey",
+    CREATE_REFUSED: "createRecord was refused; nothing is sent again before the account's posts are read — retry with the same publicationKey",
+    RECONCILE_READ_FAILED: "outcome still uncertain — the account's posts could not be read completely; nothing was sent",
+    RECONCILE_ACCOUNT_INACTIVE: "outcome still uncertain — the account is not active, so nothing can be confirmed; nothing was sent",
+    RECONCILE_CONFLICT: "the record at this publication's rkey is not this publication; not crediting it and not resending",
+} as const;
+export type PublishCode = keyof typeof SENTENCES;
+
+function fail(key: string, code: PublishCode, opts: { uncertain?: boolean; detail?: string } = {}): PublishError {
+    return new PublishError(`publication ${key}: ${code}: ${SENTENCES[code]}${opts.detail ? ` (${opts.detail})` : ""}`, !!opts.uncertain, code);
 }
 
 export interface PublishParams {
@@ -104,7 +131,6 @@ export interface PublisherOptions extends ReaderConfig {
 }
 
 const KEY = /^[A-Za-z0-9._:~-]{8,128}$/;
-const NO_ATOMIC = "this executor has no atomic durable storage write (host writeStorageFileAtomic): publishing is disabled; nothing was sent";
 const DID = /^did:(plc:[a-z2-7]{24}|web:[a-zA-Z0-9.%-]+)$/;
 const MAX_GRAPHEMES = 300;
 const MAX_BYTES = 3000;
@@ -154,8 +180,8 @@ export class Publisher {
         if (this.opts.files) {
             try {
                 raw = this.opts.files.read(ledgerFiles.entry(agent, key));
-            } catch (err) {
-                throw new PublishError(`publication ${key}: the ledger entry is unreadable (${(err as Error).message}); nothing was sent`);
+            } catch {
+                throw fail(key, "LEDGER_UNREADABLE");
             }
         }
         if (raw === null) raw = this.opts.storage.get(ledgerKeys.entry(agent, key)) ?? null;
@@ -167,7 +193,7 @@ export class Publisher {
             e = null;
         }
         if (!e || e.v !== 1 || e.key !== key || typeof e.rkey !== "string" || !isTid(e.rkey) || (e.state !== "pending" && e.state !== "published")) {
-            throw new PublishError(`publication ${key}: the ledger entry is unreadable; nothing was sent`);
+            throw fail(key, "LEDGER_UNREADABLE");
         }
         return e as LedgerEntry;
     }
@@ -176,15 +202,15 @@ export class Publisher {
      *  the strength of an unacknowledged write. */
     private save(e: LedgerEntry): void {
         const files = this.files();
-        if (!files) throw new PublishError(`publication ${e.key}: ${NO_ATOMIC}`);
+        if (!files) throw fail(e.key, "NO_ATOMIC_WRITE");
         const agent = this.opts.agentDid();
         try {
             const keys = this.indexKeys();
             // index first: a key listed without an entry file is ignored
             if (!keys.includes(e.key)) files.writeAtomic(ledgerFiles.index(agent), JSON.stringify([...keys, e.key]));
             files.writeAtomic(ledgerFiles.entry(agent, e.key), JSON.stringify(e));
-        } catch (err) {
-            throw new PublishError(`publication ${e.key}: ledger write failed (${(err as Error).message}); nothing was sent after it`);
+        } catch {
+            throw fail(e.key, "LEDGER_WRITE_FAILED");
         }
         try {
             this.opts.storage.delete(ledgerKeys.entry(agent, e.key)); // adopted round-1 entry, if any
@@ -200,7 +226,7 @@ export class Publisher {
         try {
             this.save(e);
         } catch (err) {
-            throw new PublishError(`publication ${e.key}: published as ${e.uri}, but ${(err as Error).message.replace(/^publication \S+: /, "")} — retry with the same publicationKey; it lists first`, true);
+            throw fail(e.key, "OUTCOME_NOT_RECORDED", { uncertain: true });
         }
     }
 
@@ -332,8 +358,8 @@ export class Publisher {
             let exists: boolean;
             try {
                 exists = await this.recordExists(read.pds, e);
-            } catch (err) {
-                return `cannot check the omitted publication ${uri} (${(err as Error).message})`;
+            } catch {
+                return `cannot check the omitted publication ${uri}`;
             }
             if (exists) return `the inventory at ${read.rev} omits the existing publication ${uri} — short listing`;
             this.markReadBack(e, "deleted");
@@ -392,9 +418,9 @@ export class Publisher {
             throw new PublishError(`publicationKey ${key} is already used for a different post`);
         }
         if (e?.state === "published") return this.deltaOf(e);
-        if (!this.files()) throw new PublishError(`publication ${key}: ${NO_ATOMIC}`);
+        if (!this.files()) throw fail(key, "NO_ATOMIC_WRITE");
         if (!this.opts.oauth.hasSession(account)) {
-            throw new PublishError(`${account} is not authorized for this executor user: run authorize first`);
+            throw fail(key, "NOT_AUTHORIZED");
         }
         if (!e) {
             const now = this.now();
@@ -405,14 +431,16 @@ export class Publisher {
         let pds: string;
         try {
             access = await this.opts.oauth.access(account);
+        } catch (err) {
+            throw fail(key, err instanceof OAuthError && err.code === "NOT_AUTHORIZED" ? "NOT_AUTHORIZED" : "AUTH_FAILED");
+        }
+        try {
             // account check: the DID still points at the PDS the session is for
             pds = (await resolveDid(account, this.opts.transport, this.opts)).pds;
-        } catch (err) {
-            throw new PublishError(`publication ${key}: ${(err as Error).message}`);
+        } catch {
+            throw fail(key, "ACCOUNT_UNRESOLVED");
         }
-        if (new URL(pds).origin !== new URL(access.session.pds).origin) {
-            throw new PublishError(`publication ${key}: ${account} moved from ${access.session.pds} to ${pds}: authorize again`);
-        }
+        if (new URL(pds).origin !== new URL(access.session.pds).origin) throw fail(key, "ACCOUNT_MOVED");
 
         if (e.attempts > 0) {
             // An earlier send's outcome is unknown: list before any resend.
@@ -452,25 +480,22 @@ export class Publisher {
                     this.saveOutcome(e);
                     return this.deltaOf(e);
                 }
-                reason = `createRecord answered ${r.status} without the expected uri/cid`;
+                reason = `HTTP ${r.status} without the expected uri/cid`;
             } else {
-                reason = `createRecord answered ${serverError(r)}`;
+                reason = `HTTP ${serverError(r)}`;
                 // a 4xx was refused by the PDS; a 5xx may have committed
                 uncertain = r.status >= 500;
             }
         } catch (err) {
-            reason = (err as Error).message;
+            // never the transport's message: it may name a server-derived URL
+            reason = err instanceof TimeoutError ? "timed out" : "transport error";
         }
         try {
             this.save({ ...e, lastError: reason });
         } catch {
             // the attempt is already on record; the diagnostic is optional
         }
-        throw new PublishError(
-            `publication ${key}: ${uncertain ? "outcome uncertain" : "refused"} (${reason}); ` +
-            `nothing is sent again before the account's posts are listed — retry with the same publicationKey`,
-            uncertain,
-        );
+        throw fail(key, uncertain ? "CREATE_UNCERTAIN" : "CREATE_REFUSED", { uncertain, detail: reason });
     }
 
     /** The ledger entry's record in a complete, revision-stable inventory
@@ -484,19 +509,15 @@ export class Publisher {
         let read: AccountRead;
         try {
             read = await readAccount(e.account, this.opts.transport, { ...this.opts, collections: [POST_NSID] });
-        } catch (err) {
-            throw new PublishError(
-                `publication ${e.key}: outcome still uncertain — the account's posts could not be read completely (${(err as Error).message}); nothing was sent`,
-                true,
-            );
+        } catch {
+            // never the reader's message: it may quote a body or a server field
+            throw fail(e.key, "RECONCILE_READ_FAILED", { uncertain: true });
         }
-        if (!read.active || read.rev === undefined) {
-            throw new PublishError(`publication ${e.key}: outcome still uncertain — ${e.account} is not active, so nothing can be confirmed; nothing was sent`, true);
-        }
+        if (!read.active || read.rev === undefined) throw fail(e.key, "RECONCILE_ACCOUNT_INACTIVE", { uncertain: true });
         const hit = read.records.find((r) => r.uri === uri);
         if (!hit) return null;
         if (!sameRecord(hit.value, { $type: POST_NSID, text: e.text, createdAt: e.createdAt })) {
-            throw new PublishError(`publication ${e.key}: ${uri} holds a record that is not this publication; not crediting it and not resending`);
+            throw fail(e.key, "RECONCILE_CONFLICT");
         }
         return { uri, cid: hit.cid, rev: read.rev };
     }

@@ -40,7 +40,14 @@ const REFRESH_SKEW_MS = 30_000;
 /** a pending authorization older than this is refused */
 const PENDING_TTL_MS = 15 * 60_000;
 
-export class OAuthError extends Error {}
+/** `code` classifies the failure for callers that must not repeat the
+ *  message (the publication boundary): NOT_AUTHORIZED or OAUTH_FAILED. No
+ *  message here holds a server-supplied value or a discovered URL. */
+export class OAuthError extends Error {
+    constructor(message: string, readonly code: "NOT_AUTHORIZED" | "OAUTH_FAILED" = "OAUTH_FAILED") {
+        super(message);
+    }
+}
 
 export interface OAuthOptions extends ReaderConfig {
     transport: Transport;
@@ -58,37 +65,8 @@ interface AuthServer {
     revocationEndpoint?: string;
 }
 
-/** Error identifiers a server may answer that we repeat; anything else —
- *  and every description or message — is server prose and is never
- *  quoted: a server can put a secret it received or issued into any field
- *  (round 2, item 1). OAuth (RFC 6749/9126/9449) and atproto XRPC names. */
-const KNOWN_ERRORS = new Set([
-    "invalid_request", "invalid_client", "invalid_grant", "unauthorized_client", "unsupported_grant_type",
-    "invalid_scope", "access_denied", "unsupported_response_type", "server_error", "temporarily_unavailable",
-    "invalid_request_uri", "invalid_request_object", "invalid_dpop_proof", "use_dpop_nonce", "invalid_token",
-    "insufficient_scope", "invalid_client_metadata", "invalid_redirect_uri", "invalid_authorization_details",
-    "consent_required", "login_required", "interaction_required", "account_selection_required",
-    "InvalidRequest", "InternalServerError", "AuthenticationRequired", "AuthMissing", "InvalidToken",
-    "ExpiredToken", "ScopeMissingError", "RateLimitExceeded", "RecordNotFound", "RepoNotFound", "InvalidSwap",
-    "AccountDeactivated", "AccountTakedown", "MethodNotImplemented", "UpstreamFailure", "UpstreamTimeout",
-    "NotEnoughResources", "PayloadTooLarge", "Forbidden", "NotFound",
-]);
-
-export function knownError(v: unknown): string {
-    return typeof v === "string" && KNOWN_ERRORS.has(v) ? v : "(unrecognized error)";
-}
-
-/** A server's error reply as `<status> <known error identifier>` — never
- *  its prose. */
-export function serverError(r: HttpResult): string {
-    try {
-        const j = JSON.parse(r.body);
-        if (j && typeof j === "object" && "error" in j) return `${r.status} ${knownError(j.error)}`;
-    } catch {
-        // not JSON: the status alone
-    }
-    return String(r.status);
-}
+export { knownError, serverError } from "./errors.js";
+import { knownError, serverError } from "./errors.js";
 
 export class OAuthClient {
     readonly nonces: DpopNonces;
@@ -105,11 +83,11 @@ export class OAuthClient {
 
     private async getJson(url: string, what: string): Promise<any> {
         const r = await withDeadline(this.opts.transport.fetch(url, "GET", { accept: "application/json" }, ""), this.timeout, `GET ${what}`);
-        if (r.status < 200 || r.status > 299) throw new OAuthError(`no ${what} at ${url} (${r.status})`);
+        if (r.status < 200 || r.status > 299) throw new OAuthError(`no ${what} (HTTP ${r.status})`);
         try {
             return JSON.parse(String(r.body));
         } catch {
-            throw new OAuthError(`${what} at ${url} is not JSON`);
+            throw new OAuthError(`${what} is not JSON`);
         }
     }
 
@@ -126,42 +104,42 @@ export class OAuthClient {
         const origin = new URL(pds).origin;
         const prm = await this.getJson(`${origin}/.well-known/oauth-protected-resource`, "OAuth protected-resource metadata");
         if (prm?.resource !== origin && prm?.resource !== pds) {
-            throw new OAuthError(`protected-resource metadata of ${origin} names another resource`);
+            throw new OAuthError("the PDS's protected-resource metadata names another resource");
         }
         const as = Array.isArray(prm.authorization_servers) ? prm.authorization_servers[0] : undefined;
-        if (typeof as !== "string" || !as) throw new OAuthError(`${origin} names no authorization server`);
+        if (typeof as !== "string" || !as) throw new OAuthError("the PDS names no authorization server");
         try {
             requireScheme(as, this.opts, "authorization server");
             new URL(as);
         } catch {
-            throw new OAuthError(`${origin} names an authorization server that is not an allowed URL`);
+            throw new OAuthError("the PDS names an authorization server that is not an allowed URL");
         }
         return { pds, as };
     }
 
     private async metadata(as: string): Promise<AuthServer> {
         const m = await this.getJson(`${new URL(as).origin}/.well-known/oauth-authorization-server`, "OAuth authorization-server metadata");
-        if (m?.issuer !== as) throw new OAuthError(`authorization server metadata names another issuer than ${as}`);
+        if (m?.issuer !== as) throw new OAuthError("the authorization server metadata names another issuer");
         const origin = new URL(as).origin;
         const endpoint = (k: string, what: string, required = true): string | undefined => {
             const v = m[k];
             if (v === undefined && !required) return undefined;
-            if (typeof v !== "string") throw new OAuthError(`authorization server ${as} has no ${what} endpoint`);
+            if (typeof v !== "string") throw new OAuthError(`the authorization server has no ${what} endpoint`);
             let u: URL;
             try {
                 u = new URL(v);
             } catch {
-                throw new OAuthError(`${what} endpoint of ${as} is not a URL`);
+                throw new OAuthError(`the ${what} endpoint is not a URL`);
             }
-            if (u.origin !== origin) throw new OAuthError(`${what} endpoint is not on the issuer's origin ${origin}`);
+            if (u.origin !== origin) throw new OAuthError(`the ${what} endpoint is not on the issuer's origin`);
             return v;
         };
         const parEndpoint = endpoint("pushed_authorization_request_endpoint", "PAR")!;
         const has = (k: string, v: string) => Array.isArray(m[k]) && m[k].includes(v);
-        if (!has("code_challenge_methods_supported", "S256")) throw new OAuthError(`${as} does not support PKCE S256`);
-        if (!has("dpop_signing_alg_values_supported", "ES256")) throw new OAuthError(`${as} does not support DPoP ES256`);
-        if (!has("scopes_supported", "atproto")) throw new OAuthError(`${as} does not support the atproto scope`);
-        if (m.authorization_response_iss_parameter_supported !== true) throw new OAuthError(`${as} does not send iss in its authorization responses`);
+        if (!has("code_challenge_methods_supported", "S256")) throw new OAuthError("the authorization server does not support PKCE S256");
+        if (!has("dpop_signing_alg_values_supported", "ES256")) throw new OAuthError("the authorization server does not support DPoP ES256");
+        if (!has("scopes_supported", "atproto")) throw new OAuthError("the authorization server does not support the atproto scope");
+        if (m.authorization_response_iss_parameter_supported !== true) throw new OAuthError("the authorization server does not send iss in its authorization responses");
         return {
             issuer: as,
             authorizationEndpoint: endpoint("authorization_endpoint", "authorization")!,
@@ -282,7 +260,7 @@ export class OAuthClient {
         if (this.now().getTime() - pending.createdAt > PENDING_TTL_MS) throw new OAuthError("authorization state expired; authorize again");
         const err = cb.searchParams.get("error");
         if (err) throw new OAuthError(`authorization refused: ${knownError(err)}`);
-        if (cb.searchParams.get("iss") !== pending.issuer) throw new OAuthError(`callback iss is not the issuer ${pending.issuer}`);
+        if (cb.searchParams.get("iss") !== pending.issuer) throw new OAuthError("the callback iss is not the issuer");
         const code = cb.searchParams.get("code");
         if (!code) throw new OAuthError("callback has no code");
         const key = await DpopKey.fromJwk(pending.dpopJwk, this.opts.crypto);
@@ -299,7 +277,7 @@ export class OAuthClient {
             // account check: the account's PDS must name this issuer now
             const now = await this.authServerOf(pending.account);
             if (now.as !== pending.issuer) {
-                throw new OAuthError(`${pending.account}'s PDS names another authorization server than the issuer ${pending.issuer}`);
+                throw new OAuthError(`${pending.account}'s PDS names another authorization server than the issuer`);
             }
             session.pds = now.pds;
         } catch (e) {
@@ -318,19 +296,19 @@ export class OAuthClient {
      *  access token is (about to be) expired. */
     async access(account: string): Promise<{ session: Session; key: DpopKey }> {
         let session = await this.opts.vault.getSession(account);
-        if (!session) throw new OAuthError(`${account} is not authorized for this executor user: run authorize first`);
+        if (!session) throw new OAuthError(`${account} is not authorized for this executor user: run authorize first`, "NOT_AUTHORIZED");
         const key = await DpopKey.fromJwk(session.dpopJwk, this.opts.crypto);
         if (this.now().getTime() >= session.expiresAt - REFRESH_SKEW_MS) {
             if (!session.refreshToken) {
                 this.opts.vault.deleteSession(account);
-                throw new OAuthError(`${account}: the session expired and has no refresh token: authorize again (not authorized)`);
+                throw new OAuthError(`${account}: the session expired and has no refresh token: authorize again (not authorized)`, "NOT_AUTHORIZED");
             }
             const r = await this.formPost(session.tokenEndpoint, key, {
                 grant_type: "refresh_token", refresh_token: session.refreshToken, client_id: session.clientId,
             }, "token refresh");
             if (r.status === 400 && /invalid_grant/.test(r.body)) {
                 this.opts.vault.deleteSession(account);
-                throw new OAuthError(`${account}: the refresh token was refused: authorize again (not authorized)`);
+                throw new OAuthError(`${account}: the refresh token was refused: authorize again (not authorized)`, "NOT_AUTHORIZED");
             }
             const { accessToken: _a, refreshToken: oldRefresh, expiresAt: _e, scope: _s, ...base } = session;
             let next: Session;
@@ -343,7 +321,7 @@ export class OAuthClient {
                 if (r.status !== 200) throw e;
                 await this.discard(r, session.revocationEndpoint);
                 this.opts.vault.deleteSession(account);
-                throw new OAuthError(`${(e as Error).message} (not authorized: authorize again)`);
+                throw new OAuthError(`${(e as Error).message} (not authorized: authorize again)`, "NOT_AUTHORIZED");
             }
             // no new refresh token issued: the previous one stays valid
             session = next.refreshToken ? next : { ...next, ...(oldRefresh ? { refreshToken: oldRefresh } : {}) };
