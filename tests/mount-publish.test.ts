@@ -377,6 +377,71 @@ describe("round 2 item 2: the ledger is written atomically and acknowledged befo
     });
 });
 
+describe("round 2 item 3: reconciliation is a strict, stable, exact read", () => {
+    const P = { text: TEXT, atAuthor: ALICE, publicationKey: KEY };
+    const creates = (net: FakeWriteNet, mark: number) => net.requestsLog.slice(mark).filter((r) => r.method === "POST" && r.url.includes("createRecord"));
+    async function uncertain() {
+        const h = await ready();
+        h.net.writeFaults.push({ kind: "hangBeforeCommit" }); // not on the PDS: a resend would be the danger
+        await assert.rejects(h.svc.call("class/ATPost", "publish", P), PublishError);
+        return { ...h, rkey: h.svc.publisher.ledgerEntry(KEY)!.rkey };
+    }
+    const isList = (u: string) => u.includes("com.atproto.repo.listRecords") && u.includes(encodeURIComponent(POST));
+
+    it("a malformed listing page is a failed read: nothing is sent", async () => {
+        const bodies = [
+            "{}",
+            JSON.stringify({ error: "temporarily_unavailable" }),
+            JSON.stringify({ records: null }),
+            JSON.stringify({ records: [], cursor: 5 }),
+            JSON.stringify({ records: [{ uri: `at://${ALICE}/${POST}/3kaaaaaaaaa2a` }] }),
+            JSON.stringify({ records: [{ uri: `at://${ALICE}/${POST}/3kaaaaaaaaa2a`, cid: "bafyx", value: "text" }] }),
+            JSON.stringify({ records: [{ uri: `at://${BOB}/${POST}/3kaaaaaaaaa2a`, cid: "bafyx", value: {} }] }),
+        ];
+        for (const body of bodies) {
+            const { net, svc } = await uncertain();
+            net.faults.push({ match: isList, status: 200, body, once: true });
+            const mark = net.requestsLog.length;
+            await assert.rejects(svc.call("class/ATPost", "publish", P), PublishError, body);
+            assert.equal(creates(net, mark).length, 0, `${body}: no createRecord`);
+            assert.equal(svc.publisher.ledgerEntry(KEY)!.state, "pending");
+        }
+    });
+
+    it("a head that moves during the listing is a failed read: nothing is sent", async () => {
+        const { net, svc } = await uncertain();
+        net.faults.push({ match: isList, bumpRevOf: ALICE, once: true });
+        const mark = net.requestsLog.length;
+        await assert.rejects(svc.call("class/ATPost", "publish", P), PublishError);
+        assert.equal(creates(net, mark).length, 0);
+    });
+
+    it("a record at our rkey that is not exactly ours is a conflict: not credited, not resent", async () => {
+        for (const other of [
+            { $type: POST, text: TEXT, createdAt: "2001-01-01T00:00:00.000Z" },
+            { $type: POST, text: TEXT, createdAt: "@", langs: ["en"] },
+            { $type: "app.example.other", text: TEXT, createdAt: "@" },
+        ]) {
+            const { net, svc, rkey } = await uncertain();
+            const mine = svc.publisher.ledgerEntry(KEY)!;
+            const value = { ...other, createdAt: other.createdAt === "@" ? mine.createdAt : other.createdAt };
+            net.put(ALICE, POST, rkey, JSON.stringify(value));
+            const mark = net.requestsLog.length;
+            await assert.rejects(svc.call("class/ATPost", "publish", P), /not this publication/, JSON.stringify(other));
+            assert.equal(creates(net, mark).length, 0);
+            assert.equal(svc.publisher.ledgerEntry(KEY)!.state, "pending");
+        }
+    });
+
+    it("an inactive account cannot confirm anything: nothing is sent", async () => {
+        const { net, svc } = await uncertain();
+        net.repos.get(ALICE)!.active = false;
+        const mark = net.requestsLog.length;
+        await assert.rejects(svc.call("class/ATPost", "publish", P), PublishError);
+        assert.equal(creates(net, mark).length, 0);
+    });
+});
+
 describe("rule 4: read-back by a distinct account's reader", () => {
     it("bob's reader (another agent, no session) shows alice's new post with atAuthor = alice, and bob's follow of alice", async () => {
         const { net, svc } = await ready();

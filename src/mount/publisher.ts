@@ -30,11 +30,9 @@ import type { WebCrypto } from "./webcrypto.js";
 
 import type { Transport } from "../adapters.js";
 import { newTid } from "./bytes.js";
-import { withDeadline } from "./dpop.js";
-import { parseLossless } from "./lossless-json.js";
 import { postEntry, type MountEntry } from "./mapping.js";
 import { OAuthClient, serverError } from "./oauth.js";
-import { POST_NSID, isTid, resolveDid, type ReaderConfig } from "./reader.js";
+import { POST_NSID, isTid, readAccount, resolveDid, type AccountRead, type ReaderConfig } from "./reader.js";
 import type { StorageLike } from "./vault.js";
 
 export class PublishError extends Error {
@@ -322,7 +320,7 @@ export class Publisher {
 
         if (e.attempts > 0) {
             // An earlier send's outcome is unknown: list before any resend.
-            const found = await this.findByListing(pds, e);
+            const found = await this.findByListing(e);
             if (found) {
                 e = { ...e, state: "published", uri: found.uri, cid: found.cid, commitRev: found.rev };
                 delete e.lastError;
@@ -379,57 +377,40 @@ export class Publisher {
         );
     }
 
-    private async getJson(url: string, what: string): Promise<any> {
-        const r = await withDeadline(this.opts.transport.fetch(url, "GET", { accept: "application/json" }, ""), this.opts.timeoutMs ?? 15_000, what);
-        if (r.status < 200 || r.status > 299) throw new Error(`${what} -> ${r.status}`);
-        return parseLossless(String(r.body));
-    }
-
-    /** The ledger entry's record in the account's complete post listing,
-     *  or null when a complete listing does not hold it. Anything less than
-     *  a complete listing throws (and so sends nothing). */
-    private async findByListing(pds: string, e: LedgerEntry): Promise<{ uri: string; cid: string; rev?: string } | null> {
+    /** The ledger entry's record in a complete, revision-stable inventory
+     *  of the account's posts (slice 1's strict `readAccount`: every page
+     *  validated, cursors checked, head bracketed), or null when that
+     *  inventory does not hold it. Anything less — a malformed page, a moved
+     *  head, an inactive account, any failure — throws, so nothing is sent.
+     *  A record at our rkey must be exactly the record we sent. */
+    private async findByListing(e: LedgerEntry): Promise<{ uri: string; cid: string; rev: string } | null> {
         const uri = `at://${e.account}/${POST_NSID}/${e.rkey}`;
-        const maxPages = this.opts.maxPages ?? 50;
-        let cursor: string | undefined;
-        const seen = new Set<string>();
-        let hit: { uri: string; cid: string } | null = null;
+        let read: AccountRead;
         try {
-            for (let page = 0; ; page++) {
-                if (page >= maxPages) throw new Error(`more than ${maxPages} pages`);
-                const q = new URLSearchParams({ repo: e.account, collection: POST_NSID, limit: String(this.opts.pageLimit ?? 100) });
-                if (cursor) q.set("cursor", cursor);
-                const j = await this.getJson(`${pds}/xrpc/com.atproto.repo.listRecords?${q}`, "listRecords");
-                for (const rec of Array.isArray(j?.records) ? j.records : []) {
-                    if (rec?.uri !== uri) continue;
-                    if (rec?.value?.text !== e.text || typeof rec?.cid !== "string") {
-                        throw new PublishError(`publication ${e.key}: ${uri} holds a different record; not marking it published`);
-                    }
-                    hit = { uri, cid: rec.cid };
-                }
-                if (hit) break;
-                const next = typeof j?.cursor === "string" && j.cursor ? j.cursor : undefined;
-                if (!next) break;
-                if (seen.has(next)) throw new Error("listRecords repeated a cursor");
-                seen.add(next);
-                cursor = next;
-            }
+            read = await readAccount(e.account, this.opts.transport, { ...this.opts, collections: [POST_NSID] });
         } catch (err) {
-            if (err instanceof PublishError) throw err;
             throw new PublishError(
-                `publication ${e.key}: outcome still uncertain — the account's posts could not be listed (${(err as Error).message}); nothing was sent`,
+                `publication ${e.key}: outcome still uncertain — the account's posts could not be read completely (${(err as Error).message}); nothing was sent`,
                 true,
             );
         }
-        if (!hit) return null;
-        // a head at or after the record's commit, for the snapshot overlay
-        let rev: string | undefined;
-        try {
-            const head = await this.getJson(`${pds}/xrpc/com.atproto.sync.getLatestCommit?did=${encodeURIComponent(e.account)}`, "getLatestCommit");
-            if (isTid(head?.rev)) rev = head.rev;
-        } catch {
-            // no overlay then; the next read shows it
+        if (!read.active || read.rev === undefined) {
+            throw new PublishError(`publication ${e.key}: outcome still uncertain — ${e.account} is not active, so nothing can be confirmed; nothing was sent`, true);
         }
-        return { ...hit, ...(rev ? { rev } : {}) };
+        const hit = read.records.find((r) => r.uri === uri);
+        if (!hit) return null;
+        if (!sameRecord(hit.value, { $type: POST_NSID, text: e.text, createdAt: e.createdAt })) {
+            throw new PublishError(`publication ${e.key}: ${uri} holds a record that is not this publication; not crediting it and not resending`);
+        }
+        return { uri, cid: hit.cid, rev: read.rev };
     }
 }
+
+/** Exactly these keys with exactly these string values. */
+function sameRecord(value: unknown, want: Record<string, string>): boolean {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const v = value as Record<string, unknown>;
+    const keys = Object.keys(v);
+    return keys.length === Object.keys(want).length && keys.every((k) => Object.prototype.hasOwnProperty.call(want, k) && v[k] === want[k]);
+}
+
