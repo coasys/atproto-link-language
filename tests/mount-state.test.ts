@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { MountedReader } from "../src/mount/state.js";
 import { mountShapes, CLASS_NAMES } from "../src/mount/shapes.js";
 import {
-    standardNet, baseConfig, ALICE, BOB, CAROL, POST, FOLLOW, plainPost,
+    standardNet, baseConfig, OLDEST_TID, ALICE, BOB, CAROL, POST, FOLLOW, plainPost,
 } from "./mount-fixtures.js";
 
 const NOW = () => new Date("2026-11-19T12:00:00.000Z");
@@ -190,7 +190,7 @@ describe("P1: a stable read is checked against the last accepted rev, commit and
 
     it("a revision regression is rejected and removes nothing", async () => {
         const { net, r, before } = await setup();
-        rollBack(net, "3lrev00000000", "bafycommitOLD");
+        rollBack(net, OLDEST_TID, "bafycommitOLD");
         const report = await r.refresh();
         const alice = report.accounts.find((a) => a.did === ALICE)!;
         assert.equal(alice.ok, false);
@@ -216,7 +216,7 @@ describe("P1: a stable read is checked against the last accepted rev, commit and
         assert.equal(JSON.stringify(r2.snapshot()), before);
 
         const s2 = await setup();
-        rollBack(s2.net, "3lrev00000000", "bafycommitOLD");
+        rollBack(s2.net, OLDEST_TID, "bafycommitOLD");
         const r3 = new MountedReader({ ...baseConfig, accounts: [ALICE, BOB], transport: s2.net, now: NOW, storage: s2.storage });
         const rep3 = await r3.refresh();
         assert.equal(rep3.accounts.find((a) => a.did === ALICE)!.ok, false);
@@ -230,7 +230,7 @@ describe("P1: a stable read is checked against the last accepted rev, commit and
         repo.active = false;
         repo.status = "deactivated";
         await r.refresh();
-        rollBack(net, "3lrev00000000", "bafycommitOLD");
+        rollBack(net, OLDEST_TID, "bafycommitOLD");
         repo.active = true;
         repo.status = undefined;
         const report = await r.refresh();
@@ -256,6 +256,73 @@ describe("P1: a stable read is checked against the last accepted rev, commit and
         const report = await r.refresh();
         assert.ok(report.accounts.every((a) => a.ok));
         assert.equal(JSON.stringify(r.snapshot()), before);
+    });
+});
+
+describe("round 3: a repo revision must be a valid TID (live and restored)", () => {
+    const BAD = ["z", "", "3lrev00000000", "3l222222222222", "kl22222222222", "3L22222222222"];
+
+    function setRev(net: ReturnType<typeof standardNet>, rev: string) {
+        net.repos.get(ALICE)!.rev = rev;
+    }
+
+    for (const bad of BAD) {
+        it(`a stable malformed rev ${JSON.stringify(bad)} with an empty listing removes and persists nothing`, async () => {
+            const net = standardNet();
+            const storage = memStorage();
+            const r = new MountedReader({ ...baseConfig, accounts: [ALICE, BOB], transport: net, now: NOW, storage });
+            await r.refresh();
+            const before = JSON.stringify(r.snapshot());
+            const stored = JSON.stringify(storage.keys().sort().map((k) => [k, storage.get(k)]));
+            const repo = net.repos.get(ALICE)!;
+            repo.collections.set(POST, []);
+            repo.collections.set(FOLLOW, []);
+            setRev(net, bad);
+            const report = await r.refresh();
+            const alice = report.accounts.find((a) => a.did === ALICE)!;
+            assert.equal(alice.ok, false);
+            assert.match(alice.error!, /TID/);
+            assert.deepEqual(report.delta, { changed: [], removed: [] });
+            assert.equal(JSON.stringify(r.snapshot()), before);
+            assert.equal(JSON.stringify(storage.keys().sort().map((k) => [k, storage.get(k)])), stored, "storage untouched");
+            // the baseline is not poisoned: the next valid rev is accepted
+            net.bump(ALICE);
+            const next = await r.refresh();
+            assert.equal(next.accounts.find((a) => a.did === ALICE)!.ok, true);
+        });
+    }
+
+    it("a malformed FIRST read mounts and persists nothing, and does not poison the baseline", async () => {
+        const net = standardNet();
+        const storage = memStorage();
+        setRev(net, "z");
+        const r = new MountedReader({ ...baseConfig, accounts: [ALICE, BOB], transport: net, now: NOW, storage });
+        const report = await r.refresh();
+        assert.equal(report.accounts.find((a) => a.did === ALICE)!.ok, false);
+        assert.ok(!recordAddrs(r).some((a) => a.startsWith(ALICE)));
+        assert.ok(storage.keys().every((k) => !k.endsWith(ALICE)), `persisted: ${storage.keys()}`);
+        net.bump(ALICE);
+        const next = await r.refresh();
+        assert.equal(next.accounts.find((a) => a.did === ALICE)!.ok, true);
+        assert.ok(recordAddrs(r).some((a) => a.startsWith(ALICE)));
+    });
+
+    it("a malformed restored rev discards the baseline and reports it", async () => {
+        const net = standardNet();
+        const storage = memStorage();
+        await new MountedReader({ ...baseConfig, accounts: [ALICE, BOB], transport: net, now: NOW, storage }).refresh();
+        const key = `mount/accepted/${ALICE}`;
+        const acc = JSON.parse(storage.get(key)!);
+        storage.put(key, JSON.stringify({ ...acc, rev: "z" }));
+        const r = new MountedReader({ ...baseConfig, accounts: [ALICE, BOB], transport: net, now: NOW, storage });
+        assert.match(r.restoreIssues.get(ALICE) ?? "", /TID/);
+        // a valid newer head is accepted (not refused as a regression from "z")
+        net.bump(ALICE);
+        const report = await r.refresh();
+        const alice = report.accounts.find((a) => a.did === ALICE)!;
+        assert.equal(alice.ok, true);
+        assert.match(alice.warning ?? "", /discarded/);
+        assert.notEqual(JSON.parse(storage.get(key)!).rev, "z", "a fresh baseline replaced it");
     });
 });
 

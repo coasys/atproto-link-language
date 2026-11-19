@@ -76,6 +76,15 @@ export interface Label {
 
 export class ReadError extends Error {}
 
+/** An ATProto TID: 13 chars of the base32-sortable alphabet
+ *  "234567abcdefghijklmnopqrstuvwxyz", the first in "234567abcdefghij" (the
+ *  top bit is 0). Same-length strings in this alphabet sort by value, which
+ *  is what lets revisions be compared as strings. */
+const TID = /^[234567abcdefghij][234567abcdefghijklmnopqrstuvwxyz]{12}$/;
+export function isTid(v: unknown): v is string {
+    return typeof v === "string" && TID.test(v);
+}
+
 const DID_PLC = /^did:plc:[a-z2-7]{24}$/;
 const DID_WEB = /^did:web:([a-zA-Z0-9.-]+(?:%3[aA]\d+)?)$/;
 const NSID = /^[a-zA-Z][a-zA-Z0-9-]*(\.[a-zA-Z0-9-]+){2,}$/;
@@ -207,6 +216,9 @@ export async function readAccount(did: string, transport: Transport, cfg: Reader
     const head = async () => {
         const c = await getJson(transport, xrpc("com.atproto.sync.getLatestCommit", { did }), cfg);
         if (typeof c?.rev !== "string" || typeof c?.cid !== "string") throw new ReadError(`getLatestCommit for ${did}: malformed answer`);
+        // The accepted-state guard (state.ts) compares revs as strings, which
+        // orders them only when both are well-formed TIDs.
+        if (!isTid(c.rev)) throw new ReadError(`getLatestCommit for ${did}: rev ${JSON.stringify(c.rev)} is not a valid TID`);
         return { rev: c.rev as string, cid: c.cid as string };
     };
     const start = await head();

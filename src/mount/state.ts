@@ -17,7 +17,7 @@
 
 import type { StorageAdapter, Transport } from "../adapters.js";
 import { entriesFor, type MountEntry } from "./mapping.js";
-import { fetchLabels, readAccount, POST_NSID, ReadError, type AccountRead, type ReaderConfig } from "./reader.js";
+import { fetchLabels, isTid, readAccount, POST_NSID, ReadError, type AccountRead, type ReaderConfig } from "./reader.js";
 
 export interface MountedReaderOptions extends ReaderConfig {
     /** allowlisted account DIDs; nothing else is ever read or mounted */
@@ -36,6 +36,8 @@ export interface AccountReport {
     rev?: string;
     records?: number;
     moderation?: "available" | "unavailable";
+    /** a restore-time problem, e.g. a discarded accepted baseline */
+    warning?: string;
 }
 
 export interface MountDelta {
@@ -95,6 +97,9 @@ export class MountedReader {
     private readonly opts: MountedReaderOptions;
     private readonly perAccount = new Map<string, MountEntry[]>();
     private readonly accepted = new Map<string, Accepted>();
+    /** did -> why a persisted accepted baseline was discarded on restore;
+     *  reported as `warning` until a new baseline is accepted. */
+    readonly restoreIssues = new Map<string, string>();
     private inflight: Promise<RefreshReport> | null = null;
 
     constructor(opts: MountedReaderOptions) {
@@ -113,7 +118,11 @@ export class MountedReader {
             if (!acc) continue;
             try {
                 const a = JSON.parse(acc);
-                if (typeof a?.rev === "string" && typeof a?.commitCid === "string" && a.inventory && typeof a.inventory === "object") {
+                if (!isTid(a?.rev)) {
+                    // A malformed baseline would order every later rev wrongly
+                    // (string comparison is only valid between TIDs).
+                    this.restoreIssues.set(did, `accepted baseline discarded on restore: stored rev ${JSON.stringify(a?.rev)} is not a valid TID`);
+                } else if (typeof a?.commitCid === "string" && a.inventory && typeof a.inventory === "object") {
                     this.accepted.set(did, { rev: a.rev, commitCid: a.commitCid, inventory: Object.assign(Object.create(null), a.inventory) });
                 }
             } catch {
@@ -164,13 +173,17 @@ export class MountedReader {
                     this.accepted.set(did, acc);
                     this.opts.storage?.put(acceptedKey(did), JSON.stringify(acc));
                 }
+                const warning = this.restoreIssues.get(did);
+                if (read.active && this.accepted.has(did)) this.restoreIssues.delete(did);
                 accounts.push({
+                    ...(warning ? { warning } : {}),
                     did, ok: true, active: read.active, status: read.active ? "active" : read.status,
                     rev: read.rev, records: read.records.length,
                     moderation: labels ? "available" : "unavailable",
                 });
             } catch (e) {
-                accounts.push({ did, ok: false, error: (e as Error).message ?? String(e) });
+                const warning = this.restoreIssues.get(did);
+                accounts.push({ did, ok: false, error: (e as Error).message ?? String(e), ...(warning ? { warning } : {}) });
             }
         }
         const report: RefreshReport = { at: now.toISOString(), accounts, delta: diff(before, this.snapshot().entries) };

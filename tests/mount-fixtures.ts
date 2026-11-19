@@ -96,9 +96,23 @@ export function followOf(subject: string, createdAt = "2026-11-19T10:00:00.000Z"
 }
 
 let revCounter = 0;
+/** ATProto TIDs: 13 chars of the base32-sortable alphabet, so a valid TID
+ *  sorts by value. Fixture revs are "3l" + the counter in that alphabet,
+ *  left-padded with its zero digit "2": valid and increasing. */
+export const TID_ALPHABET = "234567abcdefghijklmnopqrstuvwxyz";
+export function tidOf(n: number): string {
+    let out = "";
+    do {
+        out = TID_ALPHABET[n % 32] + out;
+        n = Math.floor(n / 32);
+    } while (n > 0);
+    return "3l" + out.padStart(11, "2");
+}
+/** The smallest valid TID: older than every fixture rev (a rollback). */
+export const OLDEST_TID = "2222222222222";
 function nextRev(): string {
     revCounter += 1;
-    return "3lrev" + String(revCounter).padStart(8, "0");
+    return tidOf(revCounter);
 }
 
 export class FakeNet implements Transport {
