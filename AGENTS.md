@@ -156,10 +156,23 @@ addresses never write.
 - `src/mount/vault.ts`, `sealed-box.ts` — tokens and DPoP keys only as boxes
   sealed to the executor agent (executor `sealed_box.rs` format, opened by
   `agentOpenSealed`), keyed `oauth/v1/session/<agent did>/<at did>`.
-- `src/mount/publisher.ts` — ledger per `publicationKey` with an rkey chosen
-  before the first send. Anything but a parsed success leaves it pending;
-  the next request with that key lists the account's posts before any
-  resend. Never add a resend path that skips the listing.
+- `src/mount/publisher.ts` — ledger per `publicationKey` with an rkey from a
+  monotonic TID allocator, chosen before the first send. Anything but a
+  parsed success leaves it pending; the next request with that key reads
+  the account's posts (slice 1's strict, revision-bracketed `readAccount`)
+  before any resend, and credits only an exact match. Never add a resend
+  path that skips that read.
+- The ledger lives in files `publish-ledger.<agent did>.<key>.json` in the
+  language storage dir, written ONLY through the host's
+  `writeStorageFileAtomic` (temp + fsync + rename + dir fsync, throws).
+  That host function is not in acorn a9 `c9d4a8de1`: it is on the local
+  ad4m branch `atproto-s2/atomic-storage-write` (`b4ba0550d`). Without it
+  publishing is refused. Never move the ledger back to the KV (best effort,
+  non-atomic).
+- Each publication has a read-back state (`confirmed` / `deleted`); the
+  snapshot serves it from the ledger until then, unless its account is
+  inactive. The reader's `vet` hook refuses a read that omits an existing
+  unconfirmed publication.
 - `src/mount/service.ts` — reader + publisher; `mount-index.ts` only binds
   the host. OAuth/PDS writes use the isolate's `fetch` (they need the
   DPoP-Nonce response header, which `httpFetch` does not return).
@@ -168,8 +181,10 @@ addresses never write.
 
 ```bash
 node --import tsx --test tests/mount-publish.test.ts tests/mount-oauth.test.ts   # hermetic
-MOUNT_LIVE=1 AD4M_EXECUTOR=<acorn executor> \
+MOUNT_LIVE=1 AD4M_EXECUTOR=<executor with writeStorageFileAtomic> \
   node --import tsx --test --test-concurrency=1 tests/mount-publish-live.test.ts
+MOUNT_LIVE=1 AD4M_EXECUTOR=<with> AD4M_EXECUTOR_PINNED=<without> \
+  node --import tsx --test --test-concurrency=1 tests/mount-ledger-crash-live.test.ts  # SIGKILL + fail-closed
 ```
 
 The live test runs `live/pds.mjs` with `CONTROL_PORT` (request log, a

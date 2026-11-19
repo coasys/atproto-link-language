@@ -590,6 +590,14 @@ describe("slice 2 — explicit OAuth publication, live", { skip: !LIVE && "set M
         assert.ok(kv.length >= 1, "language KV files exist");
         const kvText = kv.map((f) => readFileSync(f, "utf8")).join("\n");
         assert.ok(kvText.includes(`oauth/v1/session/${me}/${alice.did}`), "a sealed session is stored (the scan is not vacuous)");
+        // round 2 #2: the ledger is in files written atomically, not in the KV
+        const ledger = filesUnder(join(RUN, "executor"), new RegExp(`^publish-ledger\\.${me.replace(/[.:]/g, "\\$&")}\\.live-key-0001\\.json$`));
+        assert.equal(ledger.length, 1, "the K1 ledger file exists");
+        const entry = JSON.parse(readFileSync(ledger[0], "utf8"));
+        assert.equal(entry.state, "published");
+        assert.equal(entry.readBack, "confirmed", "read-back established by an accepted read");
+        assert.ok(!/publish\/v1\//.test(kvText), "no ledger in the KV");
+        assert.equal(filesUnder(join(RUN, "executor"), /^publish-ledger\..*\.tmp-/).length, 0, "no temp file left by a clean run");
         for (const pattern of [/"d"\s*:/, /accessToken|refreshToken|access_token|refresh_token|dpopJwk|verifier/, /"crv"\s*:\s*"P-256"/]) {
             assert.doesNotMatch(kvText.replace(/\\"/g, '"'), pattern, String(pattern));
         }
@@ -597,7 +605,7 @@ describe("slice 2 — explicit OAuth publication, live", { skip: !LIVE && "set M
             valuesChecked: values.length, kinds: {
                 accessTokens: sec.accessTokens.length, refreshTokens: sec.refreshTokens.length, verifiers: sec.verifiers.length,
                 dpopPublicKeys: sec.dpopPublic.length, passwords: env.accounts.length,
-            }, paths, hits, kvFiles: kv.length,
+            }, paths, hits, kvFiles: kv.length, ledgerFile: ledger[0], ledgerEntry: entry,
         });
     });
 });
