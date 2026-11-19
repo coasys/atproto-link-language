@@ -296,6 +296,112 @@ function mountShapesOf(svc: MountService) {
     return svc.shapes();
 }
 
+describe("round 2 item 1: server-supplied fields never reach an error text", () => {
+    async function begun(net: FakeWriteNet) {
+        const { svc } = service(net);
+        const begin = await svc.call("project", "authorize", { account: ALICE });
+        return { svc, begin };
+    }
+    const errorOf = (p: Promise<unknown>) => p.then(() => { throw new Error("expected a rejection"); }, (e) => e as Error);
+    const leaks = (e: Error, secrets: string[]) => secrets.filter((x) => x && (e.message.includes(x) || String(e.stack).includes(x)));
+
+    it("a 200 token answer with token_type / sub quoting the issued tokens and the verifier", async () => {
+        for (const field of ["token_type", "sub"]) {
+            const net = writeNet();
+            let quoted: string[] = [];
+            net.tokenOverride = (t, form) => {
+                quoted = [t.access_token, t.refresh_token, form.get("code_verifier") ?? "", form.get("code") ?? ""];
+                return { [field]: `${t.refresh_token} ${t.access_token} ${form.get("code_verifier")} ${form.get("code")}` };
+            };
+            const { svc, begin } = await begun(net);
+            const e = await errorOf(svc.call("project", "completeAuthorization", { callbackUrl: net.approve(begin.authorizeUrl, ALICE) }));
+            assert.ok(quoted.length === 4 && quoted.every(Boolean));
+            assert.deepEqual(leaks(e, quoted), [], `${field}: ${e.message}`);
+        }
+    });
+
+    it("the same on a refresh answer", async () => {
+        for (const field of ["token_type", "sub"]) {
+            const net = writeNet();
+            let now = Date.now();
+            net.nowMs = () => now;
+            net.accessTtlMs = 60_000;
+            const { svc } = service(net, { now: () => new Date(now) });
+            await svc.call("project", "completeAuthorization", {
+                callbackUrl: net.approve((await svc.call("project", "authorize", { account: ALICE })).authorizeUrl, ALICE),
+            });
+            let quoted: string[] = [];
+            net.tokenOverride = (t, form) => {
+                quoted = [t.access_token, t.refresh_token, form.get("refresh_token") ?? ""];
+                return { [field]: quoted.join(" ") };
+            };
+            now += 120_000;
+            const e = await errorOf(svc.call("class/ATPost", "publish", { text: "x", atAuthor: ALICE, publicationKey: "refresh-echo-1" }));
+            assert.ok(quoted.length === 3 && quoted.every(Boolean));
+            assert.deepEqual(leaks(e, quoted), [], `${field}: ${e.message}`);
+        }
+    });
+
+    it("metadata fetched after the exchange (resource, authorization server) quoting the tokens", async () => {
+        for (const which of ["resource", "as"]) {
+            const net = writeNet();
+            let quoted: string[] = [];
+            net.tokenOverride = (t) => {
+                quoted = [t.access_token, t.refresh_token];
+                net.prm.set(PDS, which === "resource"
+                    ? { resource: `https://${t.refresh_token}.test`, authorization_servers: [ISSUER] }
+                    : { resource: PDS, authorization_servers: [`https://${t.refresh_token}.test/${t.access_token}`] });
+                return {};
+            };
+            const { svc, begin } = await begun(net);
+            const e = await errorOf(svc.call("project", "completeAuthorization", { callbackUrl: net.approve(begin.authorizeUrl, ALICE) }));
+            assert.deepEqual(leaks(e, quoted), [], `${which}: ${e.message}`);
+        }
+    });
+
+    it("a callback error / iss quoting the code, and a malformed callback, are reported with fixed text", async () => {
+        const net = writeNet();
+        const { svc, begin } = await begun(net);
+        const ok = new URL(net.approve(begin.authorizeUrl, ALICE));
+        const code = ok.searchParams.get("code")!;
+        const bad = new URL(ok);
+        bad.searchParams.set("error", `access_denied ${code}`);
+        let e = await errorOf(svc.call("project", "completeAuthorization", { callbackUrl: bad.href }));
+        assert.deepEqual(leaks(e, [code]), [], e.message);
+        // iss quoting the code
+        const { svc: svc2, begin: b2 } = await begun(net);
+        const cb2 = new URL(net.approve(b2.authorizeUrl, ALICE));
+        const code2 = cb2.searchParams.get("code")!;
+        cb2.searchParams.set("iss", `https://${code2}.test`);
+        e = await errorOf(svc2.call("project", "completeAuthorization", { callbackUrl: cb2.href }));
+        assert.match(e.message, /iss/);
+        assert.deepEqual(leaks(e, [code2]), [], e.message);
+        // userinfo, fragment and duplicate parameters are refused before any token request
+        for (const mutate of [
+            (u: URL) => { u.username = "x"; },
+            (u: URL) => { u.hash = "frag"; },
+            (u: URL) => { u.searchParams.append("code", "second"); },
+            (u: URL) => { u.searchParams.append("state", "second"); },
+        ]) {
+            const { svc: s3, begin: b3 } = await begun(net);
+            const u = new URL(net.approve(b3.authorizeUrl, ALICE));
+            mutate(u);
+            const mark = net.requestsLog.length;
+            await assert.rejects(s3.call("project", "completeAuthorization", { callbackUrl: u.href }), /callback/);
+            assert.equal(net.requestsLog.slice(mark).filter((q) => q.url.endsWith("/oauth/token")).length, 0);
+        }
+    });
+
+    it("server error prose is never quoted: only an allowlisted error identifier", async () => {
+        const { serverError } = await import("../src/mount/oauth.js");
+        const r = (body: unknown, status = 400) => ({ status, headers: {}, body: JSON.stringify(body) });
+        assert.equal(serverError(r({ error: "invalid_grant", error_description: "token rt-abc is bad" })), "400 invalid_grant");
+        assert.equal(serverError(r({ error: "InvalidRequest", message: "bad DPoP at-xyz" })), "400 InvalidRequest");
+        assert.equal(serverError(r({ error: "rt-secret-value-123456" })), "400 (unrecognized error)");
+        assert.equal(serverError({ status: 502, headers: {}, body: "<html>at-xyz</html>" }), "502");
+    });
+});
+
 describe("rule 2: no credential can travel in a template or the bundle", () => {
     it("the template variables are exactly the five non-secret settings", () => {
         assert.deepEqual(TEMPLATE_VARS.map(([k]) => k), ["ACCOUNTS", "PLC_URL", "APPVIEW_URL", "POLL_MS", "ALLOW_HTTP"]);

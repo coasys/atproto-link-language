@@ -186,7 +186,8 @@ export class FakeWriteNet extends FakeNet {
     requestsLog: WriteRequest[] = [];
     writeFaults: WriteFault[] = [];
     /** token endpoint overrides: a test can make the AS answer a wrong sub etc. */
-    tokenOverride: Partial<Record<string, unknown>> | null = null;
+    /** token answer overrides; a function sees what was just issued and the request form */
+    tokenOverride: Partial<Record<string, unknown>> | ((issued: { access_token: string; refresh_token: string }, form: URLSearchParams) => Record<string, unknown>) | null = null;
     accessTtlMs = 3600_000;
     nowMs = () => Date.now();
     asNonce = "as-nonce-1";
@@ -340,21 +341,21 @@ export class FakeWriteNet extends FakeNet {
                 if (c.par.clientId !== form.get("client_id") || c.par.redirectUri !== form.get("redirect_uri")) return json(400, { error: "invalid_grant" }, asNonceHeader);
                 if (sha256b64u(form.get("code_verifier") ?? "") !== c.par.challenge) return json(400, { error: "invalid_grant", error_description: "PKCE verifier" }, asNonceHeader);
                 if (dp.jkt !== c.par.jkt) return json(400, { error: "invalid_dpop_key_binding" }, asNonceHeader);
-                return json(200, this.issue(c.sub, c.par.scope, dp.jkt), asNonceHeader);
+                return json(200, this.issue(c.sub, c.par.scope, dp.jkt, form), asNonceHeader);
             }
             if (grant === "refresh_token") {
                 const rt = form.get("refresh_token") ?? "";
                 const g = this.refresh.get(rt);
                 if (!g || g.jkt !== dp.jkt) return json(400, { error: "invalid_grant" }, asNonceHeader);
                 this.refresh.delete(rt); // rotation: one use
-                return json(200, this.issue(g.sub, g.scope, dp.jkt), asNonceHeader);
+                return json(200, this.issue(g.sub, g.scope, dp.jkt, form), asNonceHeader);
             }
             return json(400, { error: "unsupported_grant_type" }, asNonceHeader);
         }
         return json(404, { error: "not_found" });
     }
 
-    private issue(sub: string, scope: string, jkt: string) {
+    private issue(sub: string, scope: string, jkt: string, form: URLSearchParams) {
         const at = "at-" + rand(24);
         const rt = "rt-" + rand(24);
         const g: Grant = { sub, scope, jkt, exp: this.nowMs() + this.accessTtlMs, refresh: rt };
@@ -364,7 +365,7 @@ export class FakeWriteNet extends FakeNet {
         return {
             access_token: at, token_type: "DPoP", refresh_token: rt, scope, sub,
             expires_in: Math.floor(this.accessTtlMs / 1000),
-            ...(this.tokenOverride ?? {}),
+            ...(typeof this.tokenOverride === "function" ? this.tokenOverride({ access_token: at, refresh_token: rt }, form) : this.tokenOverride ?? {}),
         };
     }
 
