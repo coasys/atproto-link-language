@@ -1,0 +1,330 @@
+/**
+ * Slice 2 rules 1, 3 and 4 (hermetic): explicit publication through the
+ * ATPost constructor, the durable publication key with listing before any
+ * retry, and the read-back by a distinct account's reader.
+ */
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+
+import { MountService, type ServiceOptions } from "../src/mount/service.js";
+import { PublishError } from "../src/mount/publisher.js";
+import { mountShapes } from "../src/mount/shapes.js";
+import { isTid } from "../src/mount/reader.js";
+import { newTid } from "../src/mount/bytes.js";
+import { CAROL, FOLLOW, PLC, followOf, plainPost } from "./mount-fixtures.js";
+import { ALICE, BOB, FakeAgent, MemStorage, POST, SCOPE, testCrypto, writeNet, type FakeWriteNet } from "./mount-write-fixtures.js";
+
+const LANG = "QmzTestLanguage";
+
+function service(net: FakeWriteNet, over: Partial<ServiceOptions> & { agent?: FakeAgent } = {}) {
+    const agent = over.agent ?? new FakeAgent();
+    const storage = over.storage ?? new MemStorage();
+    const svc = new MountService({
+        accounts: [ALICE, BOB],
+        plcUrl: PLC,
+        appviewUrl: "",
+        transport: net,
+        storage,
+        crypto: testCrypto,
+        agent: { did: () => agent.did, openSealed: (b) => agent.openSealed(b) },
+        timeoutMs: 200,
+        writeTimeoutMs: 200,
+        pageLimit: 100,
+        maxPages: 50,
+        languageAddress: () => LANG,
+        ...over,
+    });
+    return { svc, agent, storage: storage as MemStorage };
+}
+
+async function authorize(svc: MountService, net: FakeWriteNet, did = ALICE) {
+    const begin = await svc.call("project", "authorize", { account: did });
+    return svc.call("project", "completeAuthorization", { callbackUrl: net.approve(begin.authorizeUrl, did) });
+}
+
+/** createRecord requests that reached the handler (carried the RS nonce) */
+function attempts(net: FakeWriteNet, mark = 0) {
+    return net.requestsLog.slice(mark).filter((r) => {
+        if (!(r.method === "POST" && r.url.includes("com.atproto.repo.createRecord"))) return false;
+        const payload = JSON.parse(Buffer.from((r.headers["dpop"] ?? "..").split(".")[1], "base64url").toString() || "{}");
+        return payload.nonce === net.rsNonce;
+    });
+}
+
+const KEY = "pub-key-0001";
+const TEXT = "Hello from AD4M, published explicitly";
+
+async function ready() {
+    const net = writeNet();
+    const h = service(net);
+    await h.svc.refresh();
+    await authorize(h.svc, net);
+    return { net, ...h };
+}
+
+describe("rule 1: publication is an explicit ATPost constructor call", () => {
+    it("ATPost has exactly one constructor: a call to <lang>://class/ATPost publish; nothing else writes", () => {
+        const shapes = mountShapes(LANG).shapes;
+        const post = shapes.find((s) => s.name === "ATPost")!.shape as any;
+        assert.deepEqual(post.constructor_actions, [{ action: "call", source: `${LANG}://class/ATPost`, predicate: "publish", target: "{}" }]);
+        assert.deepEqual(post.destructor_actions, []);
+        for (const s of shapes) {
+            if (s.name !== "ATPost") assert.deepEqual((s.shape as any).constructor_actions, [], `${s.name} has no constructor`);
+            for (const p of (s.shape as any).properties) {
+                assert.equal(p.setter, undefined, `${s.name}.${p.name} has no setter`);
+                assert.notEqual(p.writable, true, `${s.name}.${p.name} is not writable`);
+            }
+        }
+        assert.ok(post.properties.some((p: any) => p.name === "publicationKey" && p.max_count === 1));
+    });
+
+    it("only class/ATPost offers publish; record addresses offer no interaction (annotations never reach the PDS)", async () => {
+        const { svc } = service(writeNet());
+        assert.deepEqual(svc.interactions("class/ATPost").map((i) => i.name), ["publish"]);
+        assert.deepEqual(svc.interactions(`${ALICE}/${POST}/3kalice00001a`), []);
+        assert.deepEqual(svc.interactions(`account/${ALICE}`), []);
+        assert.deepEqual(svc.interactions("class/ATFollow"), []);
+        assert.deepEqual(
+            svc.interactions("project").map((i) => i.name).sort(),
+            ["authorize", "completeAuthorization", "refresh", "sessions", "signOut", "status"],
+        );
+    });
+
+    it("publish creates one app.bsky.feed.post through createRecord as the authorized account", async () => {
+        const { net, svc } = await ready();
+        const mark = net.requestsLog.length;
+        const delta = await svc.call("class/ATPost", "publish", { text: TEXT, atAuthor: ALICE, publicationKey: KEY });
+        const sent = attempts(net, mark);
+        assert.equal(sent.length, 1, "one createRecord reached the PDS");
+        const body = JSON.parse(sent[0].body);
+        assert.equal(body.repo, ALICE);
+        assert.equal(body.collection, POST);
+        assert.ok(isTid(body.rkey), "client-chosen TID rkey");
+        assert.notEqual(body.validate, false);
+        assert.deepEqual(Object.keys(body.record), ["$type", "text", "createdAt"]);
+        assert.equal(body.record.$type, POST);
+        assert.equal(body.record.text, TEXT);
+        assert.ok(!Number.isNaN(Date.parse(body.record.createdAt)));
+        const stored = net.postsWithText(ALICE, TEXT);
+        assert.equal(stored.length, 1);
+        assert.equal(delta.address, `${ALICE}/${POST}/${body.rkey}`);
+        assert.deepEqual(delta.removed, []);
+        assert.equal(delta.changed.length, 1);
+        const e = delta.changed[0];
+        assert.equal(e.class, "ATPost");
+        assert.equal(e.address, delta.address);
+        assert.equal(e.data.sourceUri, `at://${delta.address}`);
+        assert.equal(e.data.cid, stored[0].cid);
+        assert.equal(e.data.atAuthor, ALICE);
+        assert.equal(e.data.text, TEXT);
+        assert.equal(e.data.publicationKey, KEY);
+        assert.equal(e.data.verification, "transportTrusted");
+        assert.equal("author" in e.data, false, "no AD4M author: the executor signs links, the AT author is atAuthor");
+    });
+
+    it("refresh, snapshot, status and sessions never write — not even with a pending publication", async () => {
+        const { net, svc } = await ready();
+        net.writeFaults.push({ kind: "hangBeforeCommit" });
+        await assert.rejects(svc.call("class/ATPost", "publish", { text: TEXT, atAuthor: ALICE, publicationKey: KEY }), PublishError);
+        assert.equal(svc.publisher.ledgerEntry(KEY)?.state, "pending");
+        const mark = net.requestsLog.length;
+        for (let i = 0; i < 3; i++) {
+            await svc.refresh();
+            svc.snapshot();
+            await svc.call("project", "status");
+            await svc.call("project", "sessions");
+        }
+        const posts = net.requestsLog.slice(mark).filter((r) => r.method !== "GET");
+        assert.deepEqual(posts.map((r) => r.url), [], "no POST of any kind");
+        assert.equal(svc.publisher.ledgerEntry(KEY)?.state, "pending", "a sync does not resolve or retry it either");
+    });
+
+    it("refuses bad input before any request", async () => {
+        const { net, svc } = await ready();
+        const cases: Array<[string, Record<string, unknown>, RegExp]> = [
+            ["no key", { text: TEXT, atAuthor: ALICE }, /publicationKey/],
+            ["short key", { text: TEXT, atAuthor: ALICE, publicationKey: "k1" }, /publicationKey/],
+            ["empty text", { text: "  ", atAuthor: ALICE, publicationKey: KEY }, /text/],
+            ["long text", { text: "x".repeat(301), atAuthor: ALICE, publicationKey: KEY }, /300/],
+            ["text not a string", { text: 5, atAuthor: ALICE, publicationKey: KEY }, /text/],
+            ["author not a DID", { text: TEXT, atAuthor: "alice.test", publicationKey: KEY }, /atAuthor/],
+            ["author outside the allowlist", { text: TEXT, atAuthor: CAROL, publicationKey: KEY }, /allowlist/],
+            ["author not authorized", { text: TEXT, atAuthor: BOB, publicationKey: KEY }, /not authorized/],
+        ];
+        for (const [name, params, re] of cases) {
+            const mark = net.requestsLog.length;
+            await assert.rejects(svc.call("class/ATPost", "publish", params), re, name);
+            assert.deepEqual(net.requestsLog.slice(mark).map((r) => r.url), [], `${name}: no request`);
+            assert.equal(svc.publisher.ledgerEntry(String(params.publicationKey ?? "")), null, `${name}: no ledger entry`);
+        }
+    });
+
+    it("a new rkey is a valid, increasing TID", () => {
+        const a = newTid(1_795_000_000_000, 1);
+        const b = newTid(1_795_000_000_001, 0);
+        assert.ok(isTid(a) && isTid(b));
+        assert.ok(a < b);
+    });
+});
+
+describe("rule 3: a durable publication key; an uncertain create is listed before any retry", () => {
+    it("the same key twice gives one record and the same URI/CID, with no second request", async () => {
+        const { net, svc } = await ready();
+        const first = await svc.call("class/ATPost", "publish", { text: TEXT, atAuthor: ALICE, publicationKey: KEY });
+        const mark = net.requestsLog.length;
+        const again = await svc.call("class/ATPost", "publish", { text: TEXT, atAuthor: ALICE, publicationKey: KEY });
+        assert.deepEqual(net.requestsLog.slice(mark).map((r) => r.url), []);
+        assert.deepEqual(again, first);
+        assert.equal(net.postsWithText(ALICE, TEXT).length, 1);
+        const led = svc.publisher.ledgerEntry(KEY)!;
+        assert.equal(led.state, "published");
+        assert.equal(led.uri, first.changed[0].data.sourceUri);
+        assert.equal(led.cid, first.changed[0].data.cid);
+    });
+
+    it("the same key with other content is refused, with no request", async () => {
+        const { net, svc } = await ready();
+        await svc.call("class/ATPost", "publish", { text: TEXT, atAuthor: ALICE, publicationKey: KEY });
+        const mark = net.requestsLog.length;
+        await assert.rejects(svc.call("class/ATPost", "publish", { text: TEXT + "!", atAuthor: ALICE, publicationKey: KEY }), /already used/);
+        assert.deepEqual(net.requestsLog.slice(mark).map((r) => r.url), []);
+    });
+
+    it("the ledger survives a restart: the key still answers without a request", async () => {
+        const { net, svc, agent, storage } = await ready();
+        const first = await svc.call("class/ATPost", "publish", { text: TEXT, atAuthor: ALICE, publicationKey: KEY });
+        const { svc: restarted } = service(net, { agent, storage });
+        const mark = net.requestsLog.length;
+        const again = await restarted.call("class/ATPost", "publish", { text: TEXT, atAuthor: ALICE, publicationKey: KEY });
+        assert.deepEqual(net.requestsLog.slice(mark).map((r) => r.url), []);
+        assert.deepEqual(again, first);
+    });
+
+    for (const kind of ["commitThenHang", "commitThen500"] as const) {
+        it(`${kind}: the create is uncertain; the retry lists first, finds it and sends nothing`, async () => {
+            const { net, svc } = await ready();
+            net.writeFaults.push({ kind });
+            await assert.rejects(
+                svc.call("class/ATPost", "publish", { text: TEXT, atAuthor: ALICE, publicationKey: KEY }),
+                (e: unknown) => e instanceof PublishError && e.uncertain && /retry with the same publicationKey/.test(e.message),
+            );
+            assert.equal(net.postsWithText(ALICE, TEXT).length, 1, "the PDS did commit it");
+            const led = svc.publisher.ledgerEntry(KEY)!;
+            assert.equal(led.state, "pending");
+            const mark = net.requestsLog.length;
+            const res = await svc.call("class/ATPost", "publish", { text: TEXT, atAuthor: ALICE, publicationKey: KEY });
+            const after = net.requestsLog.slice(mark);
+            const firstList = after.findIndex((r) => r.url.includes("com.atproto.repo.listRecords") && r.url.includes(`repo=${encodeURIComponent(ALICE)}`));
+            assert.ok(firstList >= 0, "the account's records were listed");
+            assert.equal(attempts(net, mark).length, 0, "no createRecord: the listing found it");
+            assert.equal(net.postsWithText(ALICE, TEXT).length, 1, "still exactly one record");
+            const rec = net.postsWithText(ALICE, TEXT)[0];
+            assert.equal(res.address, `${ALICE}/${POST}/${rec.rkey}`);
+            assert.equal(res.address.split("/").pop(), led.rkey, "the rkey chosen before the first send");
+            assert.equal(res.changed[0].data.cid, rec.cid);
+            assert.equal(svc.publisher.ledgerEntry(KEY)!.state, "published");
+        });
+    }
+
+    it("hangBeforeCommit: the retry lists, finds nothing, then re-sends the same rkey; one record", async () => {
+        const { net, svc } = await ready();
+        net.writeFaults.push({ kind: "hangBeforeCommit" });
+        await assert.rejects(svc.call("class/ATPost", "publish", { text: TEXT, atAuthor: ALICE, publicationKey: KEY }), PublishError);
+        const rkey = svc.publisher.ledgerEntry(KEY)!.rkey;
+        const mark = net.requestsLog.length;
+        await svc.call("class/ATPost", "publish", { text: TEXT, atAuthor: ALICE, publicationKey: KEY });
+        const listAt = net.indexes((r) => r.url.includes("com.atproto.repo.listRecords")).filter((i) => i >= mark);
+        const sendAt = net.indexes((r) => r.method === "POST" && r.url.includes("createRecord")).filter((i) => i >= mark);
+        assert.ok(listAt.length > 0 && sendAt.length > 0);
+        assert.ok(Math.min(...listAt) < Math.min(...sendAt), "listed before the re-send");
+        assert.equal(attempts(net, mark).length, 1);
+        assert.equal(JSON.parse(attempts(net, mark)[0].body).rkey, rkey);
+        assert.equal(net.postsWithText(ALICE, TEXT).length, 1);
+    });
+
+    it("a definite rejection is listed before the next attempt too", async () => {
+        const { net, svc } = await ready();
+        net.writeFaults.push({ kind: "statusBeforeCommit", status: 400 });
+        await assert.rejects(svc.call("class/ATPost", "publish", { text: TEXT, atAuthor: ALICE, publicationKey: KEY }), PublishError);
+        const mark = net.requestsLog.length;
+        await svc.call("class/ATPost", "publish", { text: TEXT, atAuthor: ALICE, publicationKey: KEY });
+        const listAt = net.indexes((r) => r.url.includes("com.atproto.repo.listRecords")).filter((i) => i >= mark);
+        const sendAt = net.indexes((r) => r.method === "POST" && r.url.includes("createRecord")).filter((i) => i >= mark);
+        assert.ok(listAt.length > 0 && Math.min(...listAt) < Math.min(...sendAt));
+        assert.equal(net.postsWithText(ALICE, TEXT).length, 1);
+    });
+
+    it("a failed listing never re-sends", async () => {
+        const { net, svc } = await ready();
+        net.writeFaults.push({ kind: "hangBeforeCommit" });
+        await assert.rejects(svc.call("class/ATPost", "publish", { text: TEXT, atAuthor: ALICE, publicationKey: KEY }), PublishError);
+        net.faults.push({ match: (u) => u.includes("com.atproto.repo.listRecords"), status: 503 });
+        const mark = net.requestsLog.length;
+        await assert.rejects(svc.call("class/ATPost", "publish", { text: TEXT, atAuthor: ALICE, publicationKey: KEY }), PublishError);
+        assert.equal(net.requestsLog.slice(mark).filter((r) => r.url.includes("createRecord")).length, 0);
+        assert.equal(svc.publisher.ledgerEntry(KEY)!.state, "pending");
+    });
+
+    it("a pending publication survives a restart and is listed before any retry", async () => {
+        const { net, svc, agent, storage } = await ready();
+        net.writeFaults.push({ kind: "commitThenHang" });
+        await assert.rejects(svc.call("class/ATPost", "publish", { text: TEXT, atAuthor: ALICE, publicationKey: KEY }), PublishError);
+        const { svc: restarted } = service(net, { agent, storage });
+        const mark = net.requestsLog.length;
+        await restarted.call("class/ATPost", "publish", { text: TEXT, atAuthor: ALICE, publicationKey: KEY });
+        assert.equal(attempts(net, mark).length, 0);
+        assert.ok(net.requestsLog.slice(mark).some((r) => r.url.includes("com.atproto.repo.listRecords")));
+        assert.equal(net.postsWithText(ALICE, TEXT).length, 1);
+    });
+
+    it("concurrent publishes with one key make one create", async () => {
+        const { net, svc } = await ready();
+        const mark = net.requestsLog.length;
+        const p = { text: TEXT, atAuthor: ALICE, publicationKey: KEY };
+        const [a, b] = await Promise.all([svc.call("class/ATPost", "publish", p), svc.call("class/ATPost", "publish", p)]);
+        assert.deepEqual(a, b);
+        assert.equal(attempts(net, mark).length, 1);
+        assert.equal(net.postsWithText(ALICE, TEXT).length, 1);
+    });
+
+    it("the snapshot keeps the published post until a read at or after its commit includes it; no flap, deletion still removes", async () => {
+        const { net, svc } = await ready();
+        const delta = await svc.call("class/ATPost", "publish", { text: TEXT, atAuthor: ALICE, publicationKey: KEY });
+        const inSnap = () => svc.snapshot().entries.find((e) => e.address === delta.address);
+        assert.deepEqual(inSnap(), delta.changed[0], "served before any read");
+        const r1 = await svc.refresh();
+        assert.deepEqual(inSnap(), delta.changed[0], "the read's entry carries the key too");
+        assert.ok(!r1.delta.changed.some((e) => e.address === delta.address), "the read changes nothing about it");
+        assert.ok(!r1.delta.removed.includes(delta.address));
+        net.del(ALICE, POST, delta.address.split("/").pop()!);
+        const r2 = await svc.refresh();
+        assert.ok(r2.delta.removed.includes(delta.address), "a later complete read without it removes it");
+        assert.equal(inSnap(), undefined);
+    });
+});
+
+describe("rule 4: read-back by a distinct account's reader", () => {
+    it("bob's reader (another agent, no session) shows alice's new post with atAuthor = alice, and bob's follow of alice", async () => {
+        const { net, svc } = await ready();
+        net.put(BOB, FOLLOW, "3kbobfollow1a", followOf(ALICE));
+        const delta = await svc.call("class/ATPost", "publish", { text: TEXT, atAuthor: ALICE, publicationKey: KEY });
+        const { svc: bobView } = service(net, { accounts: [BOB, ALICE] });
+        const mark = net.requestsLog.length;
+        await bobView.refresh();
+        assert.deepEqual(net.requestsLog.slice(mark).filter((r) => r.method !== "GET").map((r) => r.url), [], "the reader only reads");
+        const entries = bobView.snapshot().entries;
+        const post = entries.find((e) => e.address === delta.address)!;
+        assert.ok(post, "alice's post is mounted in bob's view");
+        assert.equal(post.class, "ATPost");
+        assert.equal(post.data.atAuthor, ALICE);
+        assert.equal(post.data.text, TEXT);
+        assert.equal(post.data.cid, delta.changed[0].data.cid);
+        assert.equal("author" in post.data, false);
+        assert.equal("publicationKey" in post.data, false, "another user's view has no ledger");
+        const follow = entries.find((e) => e.class === "ATFollow" && e.data.atAuthor === BOB && e.data.subject === ALICE);
+        assert.ok(follow, "bob follows alice");
+        assert.equal(svc.publisher.ledgerEntry(KEY)?.state, "published");
+        assert.equal(SCOPE.includes("repo:app.bsky.feed.post?action=create"), true);
+        assert.equal(plainPost("x").includes(POST), true);
+    });
+});
