@@ -51,6 +51,11 @@ function common(rec: RawRecord, did: string): Record<string, unknown> {
     };
 }
 
+function ctsMs(l: Label): number {
+    const t = Date.parse(String(l.cts));
+    return Number.isNaN(t) ? -Infinity : t;
+}
+
 /** Labels currently in force on one record version: matching URI, no CID
  *  or this CID, not expired at `now`, and the latest label per (src, val)
  *  not a negation. */
@@ -61,7 +66,9 @@ export function activeLabels(labels: Label[], uri: string, cid: string, now: Dat
         if (l.cid !== undefined && l.cid !== cid) continue;
         const k = `${l.src}\u0000${l.val}`;
         const prev = latest.get(k);
-        if (!prev || String(l.cts) >= String(prev.cts)) latest.set(k, l);
+        // Instants, not strings: offsets and sub-second precision vary.
+        // An unparseable cts sorts oldest.
+        if (!prev || ctsMs(l) >= ctsMs(prev)) latest.set(k, l);
     }
     const out = new Set<string>();
     for (const l of latest.values()) {

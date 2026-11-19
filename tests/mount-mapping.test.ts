@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { parseLossless, stringifyLossless } from "../src/mount/lossless-json.js";
 import { MountedReader } from "../src/mount/state.js";
 import { mountShapes } from "../src/mount/shapes.js";
+import { activeLabels } from "../src/mount/mapping.js";
 import {
     standardNet, baseConfig, NESTED_POST_TEXT, ALICE, BOB, POST, FOLLOW, APPVIEW, plainPost,
 } from "./mount-fixtures.js";
@@ -191,5 +192,28 @@ describe("rule 8: label metadata and unknown moderation status", () => {
         const { reader, entries } = await mounted(net);
         assert.ok(byUri(entries, uri1));
         assert.ok(reader.lastReport!.accounts.every((a) => a.ok));
+    });
+});
+
+describe("P3: label recency compares instants, not strings", () => {
+    const uri = `at://${ALICE}/${POST}/3kalice00001a`;
+    const now = new Date("2026-11-19T12:00:00.000Z");
+
+    it("a timezone offset does not make an older negation win", () => {
+        // negation at 09:00Z (written +02:00) is OLDER than the label at 10:00Z
+        const labels = [
+            { src: "did:plc:l", uri, val: "spam", cts: "2026-11-19T10:00:00.000Z" },
+            { src: "did:plc:l", uri, val: "spam", neg: true, cts: "2026-11-19T11:00:00.000+02:00" },
+        ];
+        assert.deepEqual(activeLabels(labels, uri, "bafy", now), ["spam"]);
+    });
+
+    it("missing milliseconds do not make an older event win", () => {
+        // "…10:00:00Z" is 1 ms before "…10:00:00.001Z" but sorts after it as a string
+        const labels = [
+            { src: "did:plc:l", uri, val: "spam", neg: true, cts: "2026-11-19T10:00:00.001Z" },
+            { src: "did:plc:l", uri, val: "spam", cts: "2026-11-19T10:00:00Z" },
+        ];
+        assert.deepEqual(activeLabels(labels, uri, "bafy", now), []);
     });
 });
