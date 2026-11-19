@@ -30,6 +30,7 @@ const VARS = [
   ["PLC_URL", "https://plc.directory"],
   ["APPVIEW_URL", ""],
   ["POLL_MS", "60000"],
+  ["ALLOW_HTTP", ""],
 ];
 const BANNER = VARS.map(([k, v]) => `//!@ad4m-template-variable\nconst ${k} = ${JSON.stringify(v)};`).join("\n");
 

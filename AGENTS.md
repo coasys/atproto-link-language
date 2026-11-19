@@ -121,7 +121,9 @@ that stack's LDK (`mount` capability).
   host KV); a failed read never removes anything.
 - `src/mount/lossless-json.ts` — integers beyond 2^53 survive.
 - `mount-build.mjs` → `build/mount/bundle.js`; template variables
-  `ACCOUNTS`, `PLC_URL`, `APPVIEW_URL`, `POLL_MS` live in the banner.
+  `ACCOUNTS`, `PLC_URL`, `APPVIEW_URL`, `POLL_MS`, `ALLOW_HTTP` live in the
+  banner. URLs must be https unless `ALLOW_HTTP` is "1" (a local dev network
+  only). That is not SSRF protection: production needs an egress policy.
 
 ```bash
 node mount-build.mjs                    # MOUNT_LDK_ENTRY overrides ../ad4m-acorn/ad4m-ldk/js/lib/index.js

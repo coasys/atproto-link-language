@@ -22,6 +22,8 @@
  *   PLC_URL     PLC directory for did:plc
  *   APPVIEW_URL AppView for labels; "" = moderation unavailable
  *   POLL_MS     minimum interval between PDS reads from mountSnapshot()
+ *   ALLOW_HTTP  "1" admits http:// PDS/PLC/AppView URLs — a local dev
+ *               network only; default "" = https only. Not SSRF protection.
  */
 
 import {
@@ -41,6 +43,7 @@ declare const ACCOUNTS: string;
 declare const PLC_URL: string;
 declare const APPVIEW_URL: string;
 declare const POLL_MS: string;
+declare const ALLOW_HTTP: string;
 
 /** `httpFetch` on the Acorn stack resolves `{status, body}` for every HTTP
  *  status (older hosts returned the body and threw on non-2xx); a network
@@ -86,6 +89,7 @@ function status() {
         appviewUrl: APPVIEW_URL || null,
         moderation: APPVIEW_URL ? "appview" : "unavailable",
         pollMs: pollMs(),
+        allowHttp: ALLOW_HTTP === "1",
         lastReport: r.lastReport,
         writes: "none (read-only slice)",
     };
@@ -107,6 +111,7 @@ const language = defineLanguage({
             timeoutMs: 15000,
             pageLimit: 100,
             maxPages: 50,
+            allowHttp: ALLOW_HTTP === "1",
         });
     },
 

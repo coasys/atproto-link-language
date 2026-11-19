@@ -31,6 +31,13 @@ export interface ReaderConfig {
     /** pages per collection before the read counts as incomplete */
     maxPages?: number;
     collections?: string[];
+    /** Development exception: admit http:// for the PDS endpoint, PLC and
+     *  AppView (a local dev-env network). Default false = https only. This
+     *  is NOT SSRF protection: an https endpoint from a DID document can
+     *  still name a private or loopback host, and fetch follows redirects.
+     *  Production needs an egress policy (resolved addresses, redirects,
+     *  rebinding, discovery endpoints) — see REPORT, Limits. */
+    allowHttp?: boolean;
 }
 
 export interface ResolvedAccount {
@@ -104,7 +111,19 @@ async function getJson(transport: Transport, url: string, cfg: ReaderConfig): Pr
     }
 }
 
-function httpBase(endpoint: unknown): string {
+/** Refuse a non-https URL unless the dev exception is on. */
+function requireScheme(url: string, cfg: ReaderConfig, what: string): void {
+    let p: string;
+    try {
+        p = new URL(url).protocol;
+    } catch {
+        throw new ReadError(`${what} is not a URL: ${url}`);
+    }
+    if (p === "https:" || (p === "http:" && cfg.allowHttp)) return;
+    throw new ReadError(`${what} must be https${p === "http:" ? " (http only with allowHttp, for a local dev network)" : ""}: ${url}`);
+}
+
+function httpBase(endpoint: unknown, cfg: ReaderConfig): string {
     if (typeof endpoint !== "string") throw new ReadError("PDS endpoint is not a string");
     let u: URL;
     try {
@@ -114,6 +133,7 @@ function httpBase(endpoint: unknown): string {
     }
     if (u.protocol !== "https:" && u.protocol !== "http:") throw new ReadError(`PDS endpoint must be http(s): ${endpoint}`);
     if (u.username || u.password || u.search || u.hash) throw new ReadError(`PDS endpoint must be a bare origin: ${endpoint}`);
+    requireScheme(endpoint, cfg, "PDS endpoint");
     return u.origin + u.pathname.replace(/\/+$/, "");
 }
 
@@ -126,6 +146,7 @@ export async function resolveDid(did: string, transport: Transport, cfg: ReaderC
     let url: string;
     if (did.startsWith("did:plc:")) {
         if (!DID_PLC.test(did)) throw new ReadError(`malformed did:plc: ${did}`);
+        requireScheme(cfg.plcUrl, cfg, "PLC directory URL");
         url = `${cfg.plcUrl.replace(/\/+$/, "")}/${did}`;
     } else if (did.startsWith("did:web:")) {
         const m = DID_WEB.exec(did);
@@ -145,7 +166,7 @@ export async function resolveDid(did: string, transport: Transport, cfg: ReaderC
     const svc = services.find((s: any) =>
         (s?.id === "#atproto_pds" || s?.id === `${did}#atproto_pds`) && s?.type === "AtprotoPersonalDataServer");
     if (!svc) throw new ReadError(`cannot resolve ${did}: no #atproto_pds service`);
-    const pds = httpBase(svc.serviceEndpoint);
+    const pds = httpBase(svc.serviceEndpoint, cfg);
     const aka = Array.isArray(doc.alsoKnownAs) ? doc.alsoKnownAs : [];
     const handleUri = aka.find((a: unknown) => typeof a === "string" && a.startsWith("at://"));
     // The handle is display metadata only: identity is the DID. It is not
@@ -161,6 +182,7 @@ function q(params: Record<string, string | undefined>): string {
 
 /** One complete, revision-pinned inventory of `did`'s collections. */
 export async function readAccount(did: string, transport: Transport, cfg: ReaderConfig): Promise<AccountRead> {
+    if (cfg.appviewUrl) requireScheme(cfg.appviewUrl, cfg, "AppView URL");
     const acct = await resolveDid(did, transport, cfg);
     const xrpc = (m: string, params: Record<string, string | undefined>) => `${acct.pds}/xrpc/${m}?${q(params)}`;
 
@@ -229,6 +251,7 @@ export async function readAccount(did: string, transport: Transport, cfg: Reader
  *  data is unavailable (no AppView configured, or any request failed). */
 export async function fetchLabels(uris: string[], transport: Transport, cfg: ReaderConfig): Promise<Map<string, Label[]> | null> {
     if (!cfg.appviewUrl) return null;
+    requireScheme(cfg.appviewUrl, cfg, "AppView URL");
     const base = cfg.appviewUrl.replace(/\/+$/, "");
     const out = new Map<string, Label[]>();
     try {

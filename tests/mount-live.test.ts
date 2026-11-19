@@ -297,7 +297,7 @@ describe("mounted reader — live acceptance", { skip: !LIVE && "set MOUNT_LIVE=
         const bundle = join(ROOT, "build", "mount", "bundle.js");
         assert.ok(existsSync(bundle), "build the bundle first: node mount-build.mjs");
         const base = publishLocal(bundle);
-        const templ = { ACCOUNTS: `${alice.did},${bob.did}`, PLC_URL: env.plcUrl, APPVIEW_URL: "", POLL_MS: "3600000" };
+        const templ = { ACCOUNTS: `${alice.did},${bob.did}`, PLC_URL: env.plcUrl, APPVIEW_URL: "", POLL_MS: "3600000", ALLOW_HTTP: "1" };
         const ref = await rpc("language.applyTemplateLocal", { sourceLanguageHash: base, templateData: JSON.stringify(templ) }, 300000);
         L = ref.address;
         record("language", { base, templated: L, template: templ });

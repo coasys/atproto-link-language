@@ -178,3 +178,26 @@ describe("rule 5: inventories are complete or rejected", () => {
         assert.deepEqual(r.records, []);
     });
 });
+
+describe("decision: https by default, http only as an explicit dev exception", () => {
+    it("an http PDS endpoint is rejected by default", async () => {
+        const net = standardNet();
+        net.didDocs.set(ALICE, net.docFor(ALICE, "alice.test", "http://pds.test"));
+        await assert.rejects(resolveDid(ALICE, net, baseConfig), /https/);
+    });
+
+    it("an http PLC or AppView URL is rejected by default, before any request", async () => {
+        const net = standardNet();
+        await assert.rejects(resolveDid(ALICE, net, { ...baseConfig, plcUrl: "http://plc.test" }), /https/);
+        await assert.rejects(readAccount(ALICE, net, { ...baseConfig, appviewUrl: "http://appview.test" }), /https/);
+        assert.equal(net.log.length, 0);
+    });
+
+    it("allowHttp admits http endpoints (local dev network only)", async () => {
+        const net = standardNet();
+        net.didDocs.set(ALICE, net.docFor(ALICE, "alice.test", "http://pds.test"));
+        const r = await resolveDid(ALICE, net, { ...baseConfig, allowHttp: true });
+        assert.equal(r.pds, "http://pds.test");
+    });
+});
+
