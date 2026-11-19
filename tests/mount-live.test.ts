@@ -27,7 +27,7 @@ const EXECUTOR = process.env.AD4M_EXECUTOR ?? "";
 const PLC_PORT = Number(process.env.PLC_PORT ?? 47101);
 const PDS_PORT = Number(process.env.PDS_PORT ?? 47102);
 const AD4M_PORT = Number(process.env.AD4M_PORT ?? 47110);
-const RUN = process.env.LIVE_RUN_DIR ?? mkdtempSync(join(tmpdir(), "atproto-s1-live-"));
+const RUN = process.env.LIVE_RUN_DIR ?? (LIVE ? mkdtempSync(join(tmpdir(), "atproto-s1-live-")) : "");
 const EVIDENCE = process.env.LIVE_EVIDENCE ?? join(RUN, "evidence.json");
 const PASS = "live-test-passphrase";
 const POST = "app.bsky.feed.post";
@@ -38,6 +38,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const evidence: Record<string, unknown> = { run: RUN };
 function record(key: string, value: unknown) {
     evidence[key] = value;
+    if (!RUN) return;
     writeFileSync(EVIDENCE, JSON.stringify(evidence, null, 2));
 }
 
