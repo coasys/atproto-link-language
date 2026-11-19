@@ -7,7 +7,11 @@
   "scripts": {
     "build": "deno run --allow-all esbuild.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-vm-modules --import tsx --test tests/*.test.ts"
+    "test": "node --experimental-vm-modules --import tsx --test tests/*.test.ts",
+    "build:mount": "node mount-build.mjs",
+    "typecheck:mount": "tsc --noEmit -p tsconfig.mount.json",
+    "test:mount": "node --import tsx --test tests/mount-*.test.ts",
+    "test:mount:live": "MOUNT_LIVE=1 node --import tsx --test --test-concurrency=1 tests/mount-live.test.ts"
   },
   "author": "HexaField",
   "license": "CAL-1.0",
@@ -15,8 +19,9 @@
     "@coasys/ad4m-ldk": "link:../ad4m/ad4m-ldk/js"
   },
   "devDependencies": {
-    "typescript": "^5.4.5",
+    "@types/node": "^20.0.0",
+    "esbuild": "0.25.12",
     "tsx": "^4.16.0",
-    "@types/node": "^20.0.0"
+    "typescript": "^5.4.5"
   }
 }

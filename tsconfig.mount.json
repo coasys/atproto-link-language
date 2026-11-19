@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@coasys/ad4m-ldk": ["../ad4m-acorn/ad4m-ldk/js/lib/index.d.ts"]
+    }
+  },
+  "include": ["mount-index.ts", "src/mount/**/*.ts", "src/adapters.ts"]
+}
