@@ -7,23 +7,15 @@
 //   node mount-build.mjs
 //   MOUNT_LDK_ENTRY=<ad4m acorn checkout>/ad4m-ldk/js/lib/index.js node mount-build.mjs
 //
+// The LDK location comes from mount-ldk.mjs (MOUNT_LDK_ENTRY or ../ad4m-acorn).
 // The LDK must come from the Acorn A-step stack (its defineLanguage has the
 // `mount` capability); plain dev's LDK silently drops `mount`.
 import { build } from "esbuild";
-import { readFileSync, existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { HERE, ldkEntry } from "./mount-ldk.mjs";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const LDK = resolve(HERE, process.env.MOUNT_LDK_ENTRY || "../ad4m-acorn/ad4m-ldk/js/lib/index.js");
-if (!existsSync(LDK)) {
-  console.error(`mount-build: no LDK at ${LDK} (set MOUNT_LDK_ENTRY)`);
-  process.exit(1);
-}
-if (!readFileSync(join(dirname(LDK), "defineLanguage.js"), "utf8").includes("mountSnapshot")) {
-  console.error(`mount-build: ${LDK} has no mount capability — use the Acorn-stack LDK`);
-  process.exit(1);
-}
+const LDK = ldkEntry("mount-build");
 
 const VARS = [
   ["ACCOUNTS", ""],

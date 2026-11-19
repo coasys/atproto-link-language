@@ -8,3 +8,4 @@ pnpm-lock.yaml
 live/node_modules/
 live/.run/
 build/
+.tsconfig.mount.resolved.json

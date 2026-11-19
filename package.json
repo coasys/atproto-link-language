@@ -9,7 +9,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-vm-modules --import tsx --test tests/*.test.ts",
     "build:mount": "node mount-build.mjs",
-    "typecheck:mount": "tsc --noEmit -p tsconfig.mount.json",
+    "typecheck:mount": "node mount-typecheck.mjs",
     "test:mount": "node --import tsx --test tests/mount-*.test.ts",
     "test:mount:live": "MOUNT_LIVE=1 node --import tsx --test --test-concurrency=1 tests/mount-live.test.ts"
   },

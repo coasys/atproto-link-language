@@ -127,7 +127,7 @@ that stack's LDK (`mount` capability).
 
 ```bash
 node mount-build.mjs                    # MOUNT_LDK_ENTRY overrides ../ad4m-acorn/ad4m-ldk/js/lib/index.js
-npx tsc --noEmit -p tsconfig.mount.json
+node mount-typecheck.mjs                 # same MOUNT_LDK_ENTRY as the build (mount-ldk.mjs)
 node --import tsx --test tests/mount-*.test.ts            # hermetic
 (cd live && npm install)                                  # Node >= 22
 MOUNT_LIVE=1 AD4M_EXECUTOR=<acorn executor> \
