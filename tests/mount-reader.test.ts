@@ -91,7 +91,7 @@ describe("rule 5: inventories are complete or rejected", () => {
     it("pages through every record and pins the revision", async () => {
         const net = standardNet();
         for (let i = 0; i < 230; i++) {
-            net.put(BOB, POST, "3kbulk" + String(i).padStart(7, "2"), plainPost("bulk " + i));
+            net.put(BOB, POST, "3kbulk" + String(i).padStart(7, "0"), plainPost("bulk " + i));
         }
         const r = await readAccount(BOB, net, { ...baseConfig, pageLimit: 100 });
         assert.equal(r.records.filter((x) => x.collection === POST).length, 231);
@@ -107,7 +107,7 @@ describe("rule 5: inventories are complete or rejected", () => {
 
     it("a 429 page rejects the inventory", async () => {
         const net = standardNet();
-        for (let i = 0; i < 150; i++) net.put(ALICE, POST, "3kbulk" + String(i).padStart(7, "2"), plainPost("b" + i));
+        for (let i = 0; i < 150; i++) net.put(ALICE, POST, "3kbulk" + String(i).padStart(7, "0"), plainPost("b" + i));
         net.faults.push({ match: (u) => u.includes("listRecords") && u.includes("cursor="), status: 429 });
         await assert.rejects(readAccount(ALICE, net, baseConfig), /429/);
     });
@@ -128,13 +128,13 @@ describe("rule 5: inventories are complete or rejected", () => {
 
     it("too many pages is incomplete, not partial", async () => {
         const net = standardNet();
-        for (let i = 0; i < 30; i++) net.put(ALICE, POST, "3kbulk" + String(i).padStart(7, "2"), plainPost("b" + i));
+        for (let i = 0; i < 30; i++) net.put(ALICE, POST, "3kbulk" + String(i).padStart(7, "0"), plainPost("b" + i));
         await assert.rejects(readAccount(ALICE, net, { ...baseConfig, pageLimit: 10, maxPages: 2 }), /pages/);
     });
 
     it("a repeating cursor is rejected instead of looping", async () => {
         const net = standardNet();
-        for (let i = 0; i < 30; i++) net.put(ALICE, POST, "3kbulk" + String(i).padStart(7, "2"), plainPost("b" + i));
+        for (let i = 0; i < 30; i++) net.put(ALICE, POST, "3kbulk" + String(i).padStart(7, "0"), plainPost("b" + i));
         const orig = net.fetch.bind(net);
         net.fetch = async (url, m, h, b) => {
             const res = await orig(url, m, h, b);

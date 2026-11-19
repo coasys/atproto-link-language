@@ -16,7 +16,7 @@ export const PDS2 = "https://pds2.test";
 export const APPVIEW = "https://appview.test";
 
 export const ALICE = "did:plc:alice2222222222222222222";
-export const BOB = "did:plc:bob33333333333333333333333";
+export const BOB = "did:plc:bob333333333333333333333";
 export const CAROL = "did:web:carol.example";
 
 export const POST = "app.bsky.feed.post";
