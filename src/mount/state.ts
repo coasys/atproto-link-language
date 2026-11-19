@@ -17,7 +17,7 @@
 
 import type { StorageAdapter, Transport } from "../adapters.js";
 import { entriesFor, type MountEntry } from "./mapping.js";
-import { fetchLabels, readAccount, POST_NSID, type ReaderConfig } from "./reader.js";
+import { fetchLabels, readAccount, POST_NSID, ReadError, type AccountRead, type ReaderConfig } from "./reader.js";
 
 export interface MountedReaderOptions extends ReaderConfig {
     /** allowlisted account DIDs; nothing else is ever read or mounted */
@@ -50,12 +50,51 @@ export interface RefreshReport {
 }
 
 const storageKey = (did: string) => `mount/account/${did}`;
+const acceptedKey = (did: string) => `mount/accepted/${did}`;
+
+/** What the last accepted complete read of an active repo saw: its
+ *  revision, commit CID and record URI -> CID inventory. A later read is
+ *  checked against it before it may replace the account's entries. */
+export interface Accepted {
+    rev: string;
+    commitCid: string;
+    inventory: Record<string, string>;
+}
+
+/** Why `read` must not replace the accepted state, or null when it may.
+ *  Head stability within one read proves nothing about completeness: a 200
+ *  page without a cursor can still be short. So (a) a revision older than
+ *  the accepted one is a regression (a stale or rolled-back PDS — revisions
+ *  only increase, across migrations too); (b) the same revision with another
+ *  commit CID, or (c) the same commit with another inventory, contradicts
+ *  what was already accepted. A NEWER revision is accepted whatever its size
+ *  — a cursor-less short page on a new commit remains a transport-trust
+ *  assumption (see REPORT, Limits). */
+export function contradiction(prev: Accepted | undefined, read: AccountRead): string | null {
+    if (!prev || !read.active || read.rev === undefined || read.commitCid === undefined) return null;
+    if (read.rev < prev.rev) return `repo revision regressed from ${prev.rev} to ${read.rev} — stale or rolled-back PDS`;
+    if (read.rev > prev.rev) return null;
+    if (read.commitCid !== prev.commitCid) return `revision ${read.rev} now has commit ${read.commitCid}, accepted ${prev.commitCid}`;
+    const inv = inventoryOf(read);
+    const a = Object.keys(prev.inventory), b = Object.keys(inv);
+    if (a.length !== b.length || a.some((u) => prev.inventory[u] !== inv[u])) {
+        return `inventory at unchanged commit ${read.commitCid} differs from the accepted one (${a.length} vs ${b.length} records) — partial listing`;
+    }
+    return null;
+}
+
+function inventoryOf(read: AccountRead): Record<string, string> {
+    const inv: Record<string, string> = Object.create(null);
+    for (const r of read.records) inv[r.uri] = r.cid;
+    return inv;
+}
 
 export class MountedReader {
     readonly accounts: string[];
     lastReport: RefreshReport | null = null;
     private readonly opts: MountedReaderOptions;
     private readonly perAccount = new Map<string, MountEntry[]>();
+    private readonly accepted = new Map<string, Accepted>();
     private inflight: Promise<RefreshReport> | null = null;
 
     constructor(opts: MountedReaderOptions) {
@@ -69,6 +108,16 @@ export class MountedReader {
                 if (Array.isArray(entries)) this.perAccount.set(did, entries);
             } catch {
                 // a corrupt cache is ignored; the next complete read replaces it
+            }
+            const acc = opts.storage?.get(acceptedKey(did));
+            if (!acc) continue;
+            try {
+                const a = JSON.parse(acc);
+                if (typeof a?.rev === "string" && typeof a?.commitCid === "string" && a.inventory && typeof a.inventory === "object") {
+                    this.accepted.set(did, { rev: a.rev, commitCid: a.commitCid, inventory: Object.assign(Object.create(null), a.inventory) });
+                }
+            } catch {
+                // as above
             }
         }
     }
@@ -101,11 +150,20 @@ export class MountedReader {
         for (const did of this.accounts) {
             try {
                 const read = await readAccount(did, this.opts.transport, this.opts);
+                const bad = contradiction(this.accepted.get(did), read);
+                if (bad) throw new ReadError(`${did}: ${bad}`);
                 const postUris = read.records.filter((r) => r.collection === POST_NSID).map((r) => r.uri);
                 const labels = read.active && postUris.length ? await fetchLabels(postUris, this.opts.transport, this.opts) : null;
                 const entries = entriesFor(read, labels, now);
                 this.perAccount.set(did, entries);
                 this.opts.storage?.put(storageKey(did), JSON.stringify(entries));
+                // An inactive read hides records but keeps the accepted
+                // head, so a regression is still caught on reactivation.
+                if (read.active && read.rev !== undefined && read.commitCid !== undefined) {
+                    const acc: Accepted = { rev: read.rev, commitCid: read.commitCid, inventory: inventoryOf(read) };
+                    this.accepted.set(did, acc);
+                    this.opts.storage?.put(acceptedKey(did), JSON.stringify(acc));
+                }
                 accounts.push({
                     did, ok: true, active: read.active, status: read.active ? "active" : read.status,
                     rev: read.rev, records: read.records.length,

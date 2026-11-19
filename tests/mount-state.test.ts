@@ -146,6 +146,102 @@ describe("rule 5: only a revision-stable complete inventory removes records", ()
     });
 });
 
+describe("P1: a stable read is checked against the last accepted rev, commit and inventory", () => {
+    const posts = [`${ALICE}/${POST}/3kalice00001a`, `${ALICE}/${POST}/3kalice00002a`];
+
+    /** Truncate Alice's post listing to a 200 with no records and no cursor. */
+    function truncatePosts(net: ReturnType<typeof standardNet>) {
+        const orig = net.fetch.bind(net);
+        net.fetch = async (url, m, h, b) => {
+            if (url.includes("listRecords") && url.includes(encodeURIComponent(ALICE)) && url.includes(POST)) {
+                net.log.push(url);
+                return { status: 200, headers: {}, body: '{"records":[]}' };
+            }
+            return orig(url, m, h, b);
+        };
+    }
+
+    /** Serve an older revision of Alice's repo (a stale or rolled-back PDS). */
+    function rollBack(net: ReturnType<typeof standardNet>, rev: string, cid: string) {
+        const repo = net.repos.get(ALICE)!;
+        repo.collections.set(POST, []);
+        repo.rev = rev;
+        repo.commitCid = cid;
+    }
+
+    async function setup(storage = memStorage()) {
+        const net = standardNet();
+        const r = new MountedReader({ ...baseConfig, accounts: [ALICE, BOB], transport: net, now: NOW, storage });
+        await r.refresh();
+        return { net, r, storage, before: JSON.stringify(r.snapshot()) };
+    }
+
+    it("a same-rev empty listing is rejected and removes nothing", async () => {
+        const { net, r, before } = await setup();
+        truncatePosts(net);
+        const report = await r.refresh();
+        const alice = report.accounts.find((a) => a.did === ALICE)!;
+        assert.equal(alice.ok, false);
+        assert.match(alice.error!, /inventory/);
+        assert.deepEqual(report.delta, { changed: [], removed: [] });
+        assert.equal(JSON.stringify(r.snapshot()), before);
+        for (const a of posts) assert.ok(recordAddrs(r).includes(a));
+    });
+
+    it("a revision regression is rejected and removes nothing", async () => {
+        const { net, r, before } = await setup();
+        rollBack(net, "3lrev00000000", "bafycommitOLD");
+        const report = await r.refresh();
+        const alice = report.accounts.find((a) => a.did === ALICE)!;
+        assert.equal(alice.ok, false);
+        assert.match(alice.error!, /regress/);
+        assert.deepEqual(report.delta, { changed: [], removed: [] });
+        assert.equal(JSON.stringify(r.snapshot()), before);
+    });
+
+    it("the same rev with a different commit CID is rejected", async () => {
+        const { net, r, before } = await setup();
+        net.repos.get(ALICE)!.commitCid = "bafyFORKED";
+        const report = await r.refresh();
+        assert.equal(report.accounts.find((a) => a.did === ALICE)!.ok, false);
+        assert.equal(JSON.stringify(r.snapshot()), before);
+    });
+
+    it("both guards hold after a restart (accepted state reloaded from storage)", async () => {
+        const { net, storage, before } = await setup();
+        truncatePosts(net);
+        const r2 = new MountedReader({ ...baseConfig, accounts: [ALICE, BOB], transport: net, now: NOW, storage });
+        const rep2 = await r2.refresh();
+        assert.equal(rep2.accounts.find((a) => a.did === ALICE)!.ok, false);
+        assert.equal(JSON.stringify(r2.snapshot()), before);
+
+        const s2 = await setup();
+        rollBack(s2.net, "3lrev00000000", "bafycommitOLD");
+        const r3 = new MountedReader({ ...baseConfig, accounts: [ALICE, BOB], transport: s2.net, now: NOW, storage: s2.storage });
+        const rep3 = await r3.refresh();
+        assert.equal(rep3.accounts.find((a) => a.did === ALICE)!.ok, false);
+        assert.match(rep3.accounts.find((a) => a.did === ALICE)!.error!, /regress/);
+        assert.equal(JSON.stringify(r3.snapshot()), s2.before);
+    });
+
+    it("a newer revision that is genuinely empty is accepted", async () => {
+        const { net, r } = await setup();
+        net.del(ALICE, POST, "3kalice00001a");
+        net.del(ALICE, POST, "3kalice00002a");
+        net.del(ALICE, FOLLOW, "3kfollow0001a");
+        const report = await r.refresh();
+        assert.equal(report.accounts.find((a) => a.did === ALICE)!.ok, true);
+        assert.deepEqual(recordAddrs(r).filter((a) => a.startsWith(ALICE)), []);
+    });
+
+    it("an unchanged commit with the same inventory is still accepted (idempotent)", async () => {
+        const { r, before } = await setup();
+        const report = await r.refresh();
+        assert.ok(report.accounts.every((a) => a.ok));
+        assert.equal(JSON.stringify(r.snapshot()), before);
+    });
+});
+
 describe("rule 6: account deactivation hides its records", () => {
     it("hides an inactive account's records and shows them again on reactivation", async () => {
         const net = standardNet();

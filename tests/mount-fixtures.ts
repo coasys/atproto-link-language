@@ -98,7 +98,7 @@ export function followOf(subject: string, createdAt = "2026-11-19T10:00:00.000Z"
 let revCounter = 0;
 function nextRev(): string {
     revCounter += 1;
-    return "3lrev" + String(revCounter).padStart(8, "2");
+    return "3lrev" + String(revCounter).padStart(8, "0");
 }
 
 export class FakeNet implements Transport {
