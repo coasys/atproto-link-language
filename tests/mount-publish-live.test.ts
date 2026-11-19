@@ -598,6 +598,8 @@ describe("slice 2 — explicit OAuth publication, live", { skip: !LIVE && "set M
         assert.equal(entry.readBack, "confirmed", "read-back established by an accepted read");
         assert.ok(!/publish\/v1\//.test(kvText), "no ledger in the KV");
         assert.equal(filesUnder(join(RUN, "executor"), /^publish-ledger\..*\.tmp-/).length, 0, "no temp file left by a clean run");
+        // round 3 #2: every publication took and released the ledger lock
+        assert.equal(filesUnder(join(RUN, "executor"), /^publish-ledger\..*\.lock(\.takeover)?$/).length, 0, "no ledger lock left");
         for (const pattern of [/"d"\s*:/, /accessToken|refreshToken|access_token|refresh_token|dpopJwk|verifier/, /"crv"\s*:\s*"P-256"/]) {
             assert.doesNotMatch(kvText.replace(/\\"/g, '"'), pattern, String(pattern));
         }
