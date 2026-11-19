@@ -5,7 +5,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { resolveDid, readAccount } from "../src/mount/reader.js";
+import { resolveDid, readAccount, allowHttpSetting } from "../src/mount/reader.js";
 import {
     standardNet, baseConfig, ALICE, BOB, CAROL, PDS, PDS2, PLC, POST, plainPost,
 } from "./mount-fixtures.js";
@@ -201,3 +201,12 @@ describe("decision: https by default, http only as an explicit dev exception", (
     });
 });
 
+
+describe("ALLOW_HTTP template value", () => {
+    it("admits http only for the exact string \"1\"", () => {
+        assert.equal(allowHttpSetting("1"), true);
+        for (const v of ["", "0", "true", "yes", " 1", undefined, null, 1]) {
+            assert.equal(allowHttpSetting(v), false, JSON.stringify(v));
+        }
+    });
+});

@@ -208,6 +208,14 @@ describe("P3: label recency compares instants, not strings", () => {
         assert.deepEqual(activeLabels(labels, uri, "bafy", now), ["spam"]);
     });
 
+    it("a negation with an unparseable cts does not override a dated label", () => {
+        const labels = [
+            { src: "did:plc:l", uri, val: "spam", cts: "2026-11-19T10:00:00.000Z" },
+            { src: "did:plc:l", uri, val: "spam", neg: true, cts: "not-a-time" },
+        ];
+        assert.deepEqual(activeLabels(labels, uri, "bafy", now), ["spam"]);
+    });
+
     it("missing milliseconds do not make an older event win", () => {
         // "…10:00:00Z" is 1 ms before "…10:00:00.001Z" but sorts after it as a string
         const labels = [

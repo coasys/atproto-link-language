@@ -180,6 +180,12 @@ function q(params: Record<string, string | undefined>): string {
     return u.toString();
 }
 
+/** The ALLOW_HTTP template value: only the exact string "1" admits http
+ *  (a local dev network); anything else, including "" and "true", is https-only. */
+export function allowHttpSetting(value: unknown): boolean {
+    return value === "1";
+}
+
 /** One complete, revision-pinned inventory of `did`'s collections. */
 export async function readAccount(did: string, transport: Transport, cfg: ReaderConfig): Promise<AccountRead> {
     if (cfg.appviewUrl) requireScheme(cfg.appviewUrl, cfg, "AppView URL");

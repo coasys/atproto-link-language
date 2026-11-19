@@ -37,6 +37,7 @@ import {
 
 import type { Transport, TransportResponse } from "./src/adapters.js";
 import { MountedReader } from "./src/mount/state.js";
+import { allowHttpSetting } from "./src/mount/reader.js";
 import { mountShapes as atprotoShapes } from "./src/mount/shapes.js";
 
 declare const ACCOUNTS: string;
@@ -89,7 +90,7 @@ function status() {
         appviewUrl: APPVIEW_URL || null,
         moderation: APPVIEW_URL ? "appview" : "unavailable",
         pollMs: pollMs(),
-        allowHttp: ALLOW_HTTP === "1",
+        allowHttp: allowHttpSetting(ALLOW_HTTP),
         lastReport: r.lastReport,
         writes: "none (read-only slice)",
     };
@@ -111,7 +112,7 @@ const language = defineLanguage({
             timeoutMs: 15000,
             pageLimit: 100,
             maxPages: 50,
-            allowHttp: ALLOW_HTTP === "1",
+            allowHttp: allowHttpSetting(ALLOW_HTTP),
         });
     },
 

@@ -224,6 +224,23 @@ describe("P1: a stable read is checked against the last accepted rev, commit and
         assert.equal(JSON.stringify(r3.snapshot()), s2.before);
     });
 
+    it("a regression is still caught after a deactivate / reactivate cycle", async () => {
+        const { net, r } = await setup();
+        const repo = net.repos.get(ALICE)!;
+        repo.active = false;
+        repo.status = "deactivated";
+        await r.refresh();
+        rollBack(net, "3lrev00000000", "bafycommitOLD");
+        repo.active = true;
+        repo.status = undefined;
+        const report = await r.refresh();
+        const alice = report.accounts.find((a) => a.did === ALICE)!;
+        assert.equal(alice.ok, false);
+        assert.match(alice.error!, /regress/);
+        assert.deepEqual(report.delta, { changed: [], removed: [] });
+        assert.deepEqual(recordAddrs(r).filter((a) => a.startsWith(ALICE)), [], "the deactivated state stays");
+    });
+
     it("a newer revision that is genuinely empty is accepted", async () => {
         const { net, r } = await setup();
         net.del(ALICE, POST, "3kalice00001a");
