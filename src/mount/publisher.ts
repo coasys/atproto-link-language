@@ -30,7 +30,7 @@ import type { WebCrypto } from "./webcrypto.js";
 
 import type { Transport } from "../adapters.js";
 import { withDeadline } from "./dpop.js";
-import { newTid } from "./bytes.js";
+import { TidClock } from "./bytes.js";
 import { postEntry, type MountEntry } from "./mapping.js";
 import { OAuthClient, serverError } from "./oauth.js";
 import { POST_NSID, isTid, readAccount, resolveDid, type AccountRead, type ReaderConfig } from "./reader.js";
@@ -127,6 +127,8 @@ function graphemes(s: string): number {
 
 export class Publisher {
     private readonly locks = new Map<string, Promise<unknown>>();
+    /** rkeys: monotonic per process, seeded from the ledger on first use */
+    private tids: TidClock | null = null;
     /** read-back states not yet written (a failed ledger write keeps them here) */
     private readonly readBackMem = new Map<string, "confirmed" | "deleted">();
     private readonly now: () => Date;
@@ -242,6 +244,25 @@ export class Publisher {
     private deltaOf(e: LedgerEntry): CallDelta {
         const entry = this.entryOf(e);
         return { address: entry.address, changed: [entry], removed: [] };
+    }
+
+    /** A fresh rkey: above every rkey this user's ledger already holds, and
+     *  above every one allocated in this process. Synchronous, so
+     *  concurrent publications cannot share one. */
+    private nextRkey(now: Date): string {
+        if (!this.tids) {
+            const clock = new TidClock(this.opts.crypto.getRandomValues(new Uint16Array(1))[0] & 1023);
+            for (const k of this.indexKeys()) {
+                try {
+                    const e = this.ledgerEntry(k);
+                    if (e) clock.observe(e.rkey);
+                } catch {
+                    // unreadable entries are refused when used
+                }
+            }
+            this.tids = clock;
+        }
+        return this.tids.next(now.getTime());
     }
 
     private readBackOf(e: LedgerEntry): LedgerEntry["readBack"] {
@@ -377,8 +398,7 @@ export class Publisher {
         }
         if (!e) {
             const now = this.now();
-            const clock = this.opts.crypto.getRandomValues(new Uint16Array(1))[0] & 1023;
-            e = { v: 1, key, account, text, createdAt: now.toISOString(), rkey: newTid(now.getTime(), clock), state: "pending", attempts: 0 };
+            e = { v: 1, key, account, text, createdAt: now.toISOString(), rkey: this.nextRkey(now), state: "pending", attempts: 0 };
             this.save(e);
         }
         let access;

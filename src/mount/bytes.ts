@@ -85,3 +85,40 @@ export function newTid(nowMs: number, clockId: number): string {
     }
     return out;
 }
+
+function tidMicros(tid: string): bigint | null {
+    if (!/^[234567abcdefghij][234567abcdefghijklmnopqrstuvwxyz]{12}$/.test(tid)) return null;
+    let v = 0n;
+    for (const c of tid) v = (v << 5n) | BigInt(TID_ALPHABET.indexOf(c));
+    return v >> 10n;
+}
+
+/** A monotonic TID allocator (round 2 #5). The microsecond field is
+ *  max(clock, last + 1): within one millisecond, or when the wall clock
+ *  steps back, each TID is the previous one plus a microsecond, so TIDs
+ *  from one allocator are unique and strictly increasing. The 10-bit clock
+ *  id is fixed per allocator (random per process), which separates
+ *  allocators that happen to share a microsecond. `observe` raises the
+ *  floor to a TID already used (the ledger's rkeys after a restart). */
+export class TidClock {
+    private last = -1n;
+    constructor(private readonly clockId: number) {}
+
+    observe(tid: string): void {
+        const us = tidMicros(tid);
+        if (us !== null && us > this.last) this.last = us;
+    }
+
+    next(nowMs: number): string {
+        let us = BigInt(Math.floor(nowMs)) * 1000n;
+        if (us <= this.last) us = this.last + 1n;
+        this.last = us;
+        let v = (us << 10n) | BigInt(this.clockId & 1023);
+        let out = "";
+        for (let i = 0; i < 13; i++) {
+            out = TID_ALPHABET[Number(v & 31n)] + out;
+            v >>= 5n;
+        }
+        return out;
+    }
+}

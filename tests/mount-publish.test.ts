@@ -10,7 +10,7 @@ import { MountService, type ServiceOptions } from "../src/mount/service.js";
 import { PublishError } from "../src/mount/publisher.js";
 import { mountShapes } from "../src/mount/shapes.js";
 import { isTid } from "../src/mount/reader.js";
-import { newTid } from "../src/mount/bytes.js";
+import { newTid, TidClock } from "../src/mount/bytes.js";
 import { CAROL, FOLLOW, PLC, followOf, plainPost } from "./mount-fixtures.js";
 import { ALICE, BOB, CrashError, FakeAgent, MemStorage, POST, SCOPE, testCrypto, writeNet, type FakeWriteNet } from "./mount-write-fixtures.js";
 import { ledgerFiles } from "../src/mount/publisher.js";
@@ -507,6 +507,41 @@ describe("round 2 item 4: the overlay keeps a publication until a read includes 
         delete net.repos.get(ALICE)!.status;
         await svc.refresh();
         assert.deepEqual(inSnap(svc, delta.address), delta.changed[0]);
+    });
+});
+
+describe("round 2 item 5: rkeys come from a monotonic TID allocator", () => {
+    it("10k TIDs in a tight loop at one frozen millisecond are valid, unique and strictly increasing", () => {
+        const clock = new TidClock(7);
+        const out: string[] = [];
+        for (let i = 0; i < 10_000; i++) out.push(clock.next(1_795_000_000_000));
+        assert.ok(out.every(isTid), "valid TIDs");
+        assert.equal(new Set(out).size, out.length, "unique");
+        for (let i = 1; i < out.length; i++) assert.ok(out[i - 1] < out[i], `sorted at ${i}`);
+    });
+
+    it("a clock that steps back does not step the TIDs back", () => {
+        const clock = new TidClock(1);
+        const a = clock.next(1_795_000_000_500);
+        const b = clock.next(1_795_000_000_000);
+        assert.ok(a < b);
+    });
+
+    it("distinct publications in one millisecond, and after a restart, get distinct increasing rkeys", async () => {
+        const frozen = new Date(1_795_000_000_000);
+        const net = writeNet();
+        const h = service(net, { now: () => frozen });
+        await h.svc.refresh();
+        await authorize(h.svc, net);
+        const keys = Array.from({ length: 20 }, (_, i) => `same-ms-key-${String(i).padStart(2, "0")}`);
+        const res = await Promise.all(keys.map((k, i) => h.svc.call("class/ATPost", "publish", { text: `post ${i}`, atAuthor: ALICE, publicationKey: k })));
+        const rkeys = res.map((r) => r.address.split("/").pop()!);
+        assert.equal(new Set(rkeys).size, 20, "unique");
+        const { svc: restarted } = service(net, { now: () => frozen, agent: h.agent, storage: h.storage });
+        const after = await restarted.call("class/ATPost", "publish", { text: "after restart", atAuthor: ALICE, publicationKey: "same-ms-key-restart" });
+        const last = after.address.split("/").pop()!;
+        assert.ok(rkeys.every((r) => r < last), "above every rkey already in the ledger");
+        for (let i = 0; i < 20; i++) assert.equal(net.postsWithText(ALICE, `post ${i}`).length, 1);
     });
 });
 
