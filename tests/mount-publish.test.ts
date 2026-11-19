@@ -442,6 +442,74 @@ describe("round 2 item 3: reconciliation is a strict, stable, exact read", () =>
     });
 });
 
+describe("round 2 item 4: the overlay keeps a publication until a read includes it", () => {
+    const P = { text: TEXT, atAuthor: ALICE, publicationKey: KEY };
+    const inSnap = (svc: MountService, address: string) => svc.snapshot().entries.find((e) => e.address === address);
+    const isPostList = (u: string) => u.includes("com.atproto.repo.listRecords") && u.includes(encodeURIComponent(ALICE)) && u.includes(encodeURIComponent(POST));
+    /** alice's real post listing without `rkey` — a short page at the current head */
+    function listingWithout(net: FakeWriteNet, rkey: string): string {
+        const recs = (net.repos.get(ALICE)!.collections.get(POST) ?? []).filter((r) => r.rkey !== rkey)
+            .map((r) => `{"uri":${JSON.stringify(`at://${ALICE}/${POST}/${r.rkey}`)},"cid":${JSON.stringify(r.cid)},"value":${r.value}}`);
+        return `{"records":[${recs.join(",")}]}`;
+    }
+
+    it("a publication answered without a commit revision is served until a read includes it", async () => {
+        const { net, svc } = await ready();
+        net.omitCommit = true;
+        const delta = await svc.call("class/ATPost", "publish", P);
+        assert.equal(svc.publisher.ledgerEntry(KEY)!.commitRev, undefined);
+        assert.deepEqual(inSnap(svc, delta.address), delta.changed[0], "served right after the call");
+        await svc.refresh();
+        assert.deepEqual(inSnap(svc, delta.address), delta.changed[0], "and from the read");
+    });
+
+    it("a publication confirmed by reconciliation is served before any refresh", async () => {
+        const { net, svc } = await ready();
+        net.writeFaults.push({ kind: "commitThenHang" });
+        await assert.rejects(svc.call("class/ATPost", "publish", P), PublishError);
+        const delta = await svc.call("class/ATPost", "publish", P);
+        assert.deepEqual(inSnap(svc, delta.address), delta.changed[0]);
+    });
+
+    it("a short read at the publication's revision neither retires the overlay nor becomes the baseline", async () => {
+        const { net, svc } = await ready();
+        const delta = await svc.call("class/ATPost", "publish", P);
+        const rkey = delta.address.split("/").pop()!;
+        net.faults.push({ match: isPostList, status: 200, body: listingWithout(net, rkey), once: true });
+        const r1 = await svc.refresh();
+        assert.equal(r1.accounts.find((a) => a.did === ALICE)!.ok, false, "the short read is refused");
+        assert.deepEqual(inSnap(svc, delta.address), delta.changed[0], "still served");
+        const r2 = await svc.refresh();
+        assert.equal(r2.accounts.find((a) => a.did === ALICE)!.ok, true, "the correct read at the same commit is accepted");
+        assert.deepEqual(inSnap(svc, delta.address), delta.changed[0]);
+        assert.equal(svc.publisher.ledgerEntry(KEY)!.readBack, "confirmed");
+    });
+
+    it("a post deleted before any read-back is removed once the PDS confirms the deletion", async () => {
+        const { net, svc } = await ready();
+        const delta = await svc.call("class/ATPost", "publish", P);
+        net.del(ALICE, POST, delta.address.split("/").pop()!);
+        const r = await svc.refresh();
+        assert.ok(net.requestsLog.some((q) => q.url.includes("com.atproto.repo.getRecord")), "the deletion was checked explicitly");
+        assert.ok(r.delta.removed.includes(delta.address));
+        assert.equal(inSnap(svc, delta.address), undefined);
+        assert.equal(svc.publisher.ledgerEntry(KEY)!.readBack, "deleted");
+    });
+
+    it("an account deactivated before read-back hides the publication; reactivation shows it", async () => {
+        const { net, svc } = await ready();
+        const delta = await svc.call("class/ATPost", "publish", P);
+        net.repos.get(ALICE)!.active = false;
+        net.repos.get(ALICE)!.status = "deactivated";
+        await svc.refresh();
+        assert.equal(inSnap(svc, delta.address), undefined, "hidden with the account");
+        net.repos.get(ALICE)!.active = true;
+        delete net.repos.get(ALICE)!.status;
+        await svc.refresh();
+        assert.deepEqual(inSnap(svc, delta.address), delta.changed[0]);
+    });
+});
+
 describe("rule 4: read-back by a distinct account's reader", () => {
     it("bob's reader (another agent, no session) shows alice's new post with atAuthor = alice, and bob's follow of alice", async () => {
         const { net, svc } = await ready();

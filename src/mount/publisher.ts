@@ -29,6 +29,7 @@
 import type { WebCrypto } from "./webcrypto.js";
 
 import type { Transport } from "../adapters.js";
+import { withDeadline } from "./dpop.js";
 import { newTid } from "./bytes.js";
 import { postEntry, type MountEntry } from "./mapping.js";
 import { OAuthClient, serverError } from "./oauth.js";
@@ -61,6 +62,10 @@ export interface LedgerEntry {
     cid?: string;
     /** a repo revision at or after the record's commit */
     commitRev?: string;
+    /** read-back: "confirmed" once a stable complete inventory held the
+     *  post; "deleted" once the PDS confirmed it gone. Until either, the
+     *  snapshot serves the post from the ledger (round 2 #4). */
+    readBack?: "confirmed" | "deleted";
     lastError?: string;
 }
 
@@ -122,6 +127,8 @@ function graphemes(s: string): number {
 
 export class Publisher {
     private readonly locks = new Map<string, Promise<unknown>>();
+    /** read-back states not yet written (a failed ledger write keeps them here) */
+    private readonly readBackMem = new Map<string, "confirmed" | "deleted">();
     private readonly now: () => Date;
 
     constructor(private readonly opts: PublisherOptions) {
@@ -237,11 +244,27 @@ export class Publisher {
         return { address: entry.address, changed: [entry], removed: [] };
     }
 
+    private readBackOf(e: LedgerEntry): LedgerEntry["readBack"] {
+        return this.readBackMem.get(e.key) ?? e.readBack;
+    }
+
+    private markReadBack(e: LedgerEntry, state: "confirmed" | "deleted"): void {
+        this.readBackMem.set(e.key, state);
+        try {
+            this.save({ ...e, readBack: state });
+            this.readBackMem.delete(e.key);
+        } catch {
+            // kept in memory for this run; the next accepted read sets it again
+        }
+    }
+
     /** The reader's entries with the ledger applied: a published post
-     *  carries its `publicationKey`, and a post published here but not yet
-     *  in an accepted read at or after its commit is served from the ledger
-     *  (so the executor's sweep does not remove it in between). */
-    decorate(entries: MountEntry[], acceptedRev: (did: string) => string | undefined): MountEntry[] {
+     *  carries its `publicationKey`, and a publication not (yet) in the
+     *  served inventory is served from the ledger — unless the PDS
+     *  confirmed it deleted, or its account is inactive (hidden with the
+     *  account's other records). No revision arithmetic: an unconfirmed
+     *  publication stays until a read includes it (see `vetRead`). */
+    decorate(entries: MountEntry[], inactive: (did: string) => boolean): MountEntry[] {
         const pubs = this.published().filter((e) => this.opts.accounts.includes(e.account));
         if (!pubs.length) return entries;
         const byAddress = new Map(pubs.map((e) => [`${e.account}/${POST_NSID}/${e.rkey}`, e]));
@@ -253,12 +276,65 @@ export class Publisher {
             return { ...entry, data: { ...entry.data, publicationKey: e.key } };
         });
         for (const [address, e] of byAddress) {
-            if (seen.has(address)) continue;
-            const acc = acceptedRev(e.account);
-            if (e.commitRev !== undefined && (acc === undefined || acc < e.commitRev)) out.push(this.entryOf(e));
+            if (seen.has(address) || this.readBackOf(e) === "deleted" || inactive(e.account)) continue;
+            out.push(this.entryOf(e));
         }
         out.sort((a, b) => (a.address < b.address ? -1 : a.address > b.address ? 1 : 0));
         return out;
+    }
+
+    /** The reader's hook on a stable, uncontradicted read of `did`, before
+     *  it is accepted. For each publication of that account:
+     *   - in the inventory -> read-back confirmed;
+     *   - confirmed earlier, now omitted -> deleted (a complete accepted
+     *     read is authoritative for a record it has seen before);
+     *   - never confirmed, omitted by a read older than its commit -> wait;
+     *   - never confirmed, omitted at or after its commit (or with no known
+     *     commit) -> ask the PDS for the record: gone -> deleted; present ->
+     *     this inventory is short, so the read is refused and never becomes
+     *     the baseline. A failed check refuses the read too. */
+    async vetRead(did: string, read: AccountRead): Promise<string | null> {
+        if (!read.active || read.rev === undefined) return null;
+        const uris = new Set(read.records.map((r) => r.uri));
+        for (const e of this.published()) {
+            if (e.account !== did || this.readBackOf(e) === "deleted") continue;
+            const uri = `at://${did}/${POST_NSID}/${e.rkey}`;
+            if (uris.has(uri)) {
+                if (this.readBackOf(e) !== "confirmed") this.markReadBack(e, "confirmed");
+                continue;
+            }
+            if (this.readBackOf(e) === "confirmed") {
+                this.markReadBack(e, "deleted");
+                continue;
+            }
+            if (e.commitRev !== undefined && read.rev < e.commitRev) continue;
+            let exists: boolean;
+            try {
+                exists = await this.recordExists(read.pds, e);
+            } catch (err) {
+                return `cannot check the omitted publication ${uri} (${(err as Error).message})`;
+            }
+            if (exists) return `the inventory at ${read.rev} omits the existing publication ${uri} — short listing`;
+            this.markReadBack(e, "deleted");
+        }
+        return null;
+    }
+
+    /** `com.atproto.repo.getRecord`: true when present, false on
+     *  RecordNotFound, throws on anything else. */
+    private async recordExists(pds: string, e: LedgerEntry): Promise<boolean> {
+        const q = new URLSearchParams({ repo: e.account, collection: POST_NSID, rkey: e.rkey });
+        const r = await withDeadline(this.opts.transport.fetch(`${pds}/xrpc/com.atproto.repo.getRecord?${q}`, "GET", { accept: "application/json" }, ""),
+            this.opts.timeoutMs ?? 15_000, "getRecord");
+        let j: any = null;
+        try {
+            j = JSON.parse(String(r.body));
+        } catch {
+            // handled below
+        }
+        if (r.status === 200 && j?.uri === `at://${e.account}/${POST_NSID}/${e.rkey}`) return true;
+        if (r.status === 400 && j?.error === "RecordNotFound") return false;
+        throw new Error(`getRecord answered ${r.status}`);
     }
 
     // ---- publish ----

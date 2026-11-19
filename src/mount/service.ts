@@ -67,7 +67,10 @@ export class MountService {
             maxPages: opts.maxPages,
             allowHttp: opts.allowHttp,
         };
-        this.reader = new MountedReader({ ...cfg, accounts: opts.accounts, transport: opts.transport, storage: opts.storage, now: opts.now });
+        this.reader = new MountedReader({
+            ...cfg, accounts: opts.accounts, transport: opts.transport, storage: opts.storage, now: opts.now,
+            vet: (did, read) => this.publisher.vetRead(did, read),
+        });
         const writeTransport = opts.writeTransport ?? opts.transport;
         this.vault = new CredentialVault(opts.storage, opts.agent, opts.crypto);
         this.oauth = new OAuthClient({
@@ -85,7 +88,7 @@ export class MountService {
     }
 
     snapshot(): { entries: MountEntry[] } {
-        return { entries: this.publisher.decorate(this.reader.snapshot().entries, (did) => this.reader.acceptedRev(did)) };
+        return { entries: this.publisher.decorate(this.reader.snapshot().entries, (did) => this.reader.isInactive(did)) };
     }
 
     /** Read every account; the delta is taken over the served snapshot (the

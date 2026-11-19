@@ -226,6 +226,8 @@ export class FakeWriteNet extends FakeNet {
     writeFaults: WriteFault[] = [];
     /** token endpoint overrides: a test can make the AS answer a wrong sub etc. */
     /** token answer overrides; a function sees what was just issued and the request form */
+    /** createRecord answers without `commit` (a PDS may omit it) */
+    omitCommit = false;
     tokenOverride: Partial<Record<string, unknown>> | ((issued: { access_token: string; refresh_token: string }, form: URLSearchParams) => Record<string, unknown>) | null = null;
     accessTtlMs = 3600_000;
     nowMs = () => Date.now();
@@ -268,6 +270,19 @@ export class FakeWriteNet extends FakeNet {
         if (u.origin === ISSUER && u.pathname.startsWith("/oauth/")) {
             this.log.push(url);
             return this.oauth(u, method, h, body);
+        }
+        if (method === "GET" && u.pathname === "/xrpc/com.atproto.repo.getRecord") {
+            this.log.push(url);
+            for (const f of [...this.faults]) {
+                if (!f.match(url)) continue;
+                if (f.once) this.faults.splice(this.faults.indexOf(f), 1);
+                if ("status" in f) return { status: f.status, headers: {}, body: f.body ?? "{}" };
+            }
+            const repo = this.repos.get(u.searchParams.get("repo") ?? "");
+            const rec = repo?.collections.get(u.searchParams.get("collection") ?? "")?.find((r) => r.rkey === u.searchParams.get("rkey"));
+            if (!repo) return json(400, { error: "RepoNotFound" });
+            if (!rec) return json(400, { error: "RecordNotFound", message: "Could not locate record" });
+            return { status: 200, headers: {}, body: `{"uri":${JSON.stringify(`at://${repo.did}/${u.searchParams.get("collection")}/${rec.rkey}`)},"cid":${JSON.stringify(rec.cid)},"value":${rec.value}}` };
         }
         if (method === "POST" && u.pathname === "/xrpc/com.atproto.repo.createRecord") {
             this.log.push(url);
@@ -439,7 +454,7 @@ export class FakeWriteNet extends FakeNet {
         this.commitCounter += 1;
         const cid = `bafyreipub${this.commitCounter}${rkey}`;
         this.put(input.repo, input.collection, rkey, JSON.stringify(input.record), cid);
-        const out = { uri: `at://${input.repo}/${input.collection}/${rkey}`, cid, commit: { cid: repo.commitCid, rev: repo.rev }, validationStatus: "valid" };
+        const out = { uri: `at://${input.repo}/${input.collection}/${rkey}`, cid, ...(this.omitCommit ? {} : { commit: { cid: repo.commitCid, rev: repo.rev } }), validationStatus: "valid" };
         if (fault?.kind === "commitThenHang") return new Promise(() => {});
         if (fault?.kind === "commitThen500") return json(500, { error: "InternalServerError" }, rsNonceHeaders);
         return json(200, out, rsNonceHeaders);

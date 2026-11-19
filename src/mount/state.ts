@@ -25,6 +25,10 @@ export interface MountedReaderOptions extends ReaderConfig {
     transport: Transport;
     storage?: Pick<StorageAdapter, "get" | "put" | "delete">;
     now?: () => Date;
+    /** Runs on a stable, uncontradicted read before it is accepted; a
+     *  reason refuses the read (kept as a failed read). The publisher uses
+     *  it to establish read-back and refuse a short read (round 2 #4). */
+    vet?: (did: string, read: AccountRead) => Promise<string | null>;
 }
 
 export interface AccountReport {
@@ -142,6 +146,13 @@ export class MountedReader {
         }
     }
 
+    /** Whether the served state of `did` is an inactive account (its
+     *  records hidden). */
+    isInactive(did: string): boolean {
+        const acct = (this.perAccount.get(did) ?? []).find((e) => e.class === "ATAccount");
+        return acct?.data.active === false;
+    }
+
     /** The revision of the last accepted complete read of `did`, if any. */
     acceptedRev(did: string): string | undefined {
         return this.accepted.get(did)?.rev;
@@ -177,6 +188,8 @@ export class MountedReader {
                 const read = await readAccount(did, this.opts.transport, this.opts);
                 const bad = contradiction(this.accepted.get(did), read);
                 if (bad) throw new ReadError(`${did}: ${bad}`);
+                const veto = this.opts.vet ? await this.opts.vet(did, read) : null;
+                if (veto) throw new ReadError(`${did}: ${veto}`);
                 const postUris = read.records.filter((r) => r.collection === POST_NSID).map((r) => r.uri);
                 const labels = read.active && postUris.length ? await fetchLabels(postUris, this.opts.transport, this.opts) : null;
                 const entries = entriesFor(read, labels, now);
