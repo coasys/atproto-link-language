@@ -122,16 +122,19 @@ export async function dpopRequest(
 ): Promise<HttpResult> {
     let last: HttpResult | null = null;
     for (let attempt = 0; attempt < 2; attempt++) {
+        // the nonce this proof carries: a concurrent request may update the
+        // cache before this one's challenge arrives
+        const sent = nonces.get(req.url);
         const headers: Record<string, string> = {
             ...req.headers,
-            DPoP: await key.proof(req.method, req.url, nonces.get(req.url), req.accessToken),
+            DPoP: await key.proof(req.method, req.url, sent, req.accessToken),
         };
         if (req.accessToken !== undefined) headers.Authorization = `DPoP ${req.accessToken}`;
         const raw = await withDeadline(transport.fetch(req.url, req.method, headers, req.body), timeoutMs, what);
         last = { status: raw.status, headers: lower(raw.headers), body: String(raw.body ?? "") };
-        const before = nonces.get(req.url);
         nonces.take(req.url, last);
-        if (!(isNonceChallenge(last) && attempt === 0 && nonces.get(req.url) !== undefined && nonces.get(req.url) !== before)) break;
+        // resend once if challenged and a nonce other than the one sent is known
+        if (!(isNonceChallenge(last) && attempt === 0 && nonces.get(req.url) !== undefined && nonces.get(req.url) !== sent)) break;
     }
     return last!;
 }

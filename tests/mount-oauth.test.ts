@@ -403,6 +403,30 @@ describe("round 2 item 1: server-supplied fields never reach an error text", () 
     });
 });
 
+describe("DPoP nonce retry under concurrency (found by round 2 #5)", () => {
+    it("two concurrent requests that both sent a stale nonce both retry with the new one", async () => {
+        const { DpopKey, DpopNonces, dpopRequest } = await import("../src/mount/dpop.js");
+        const key = await DpopKey.generate(testCrypto);
+        const nonces = new DpopNonces();
+        let arrived = 0;
+        let release!: () => void;
+        const barrier = new Promise<void>((r) => (release = r));
+        const transport = {
+            async fetch(_u: string, _m: string, headers: Record<string, string>) {
+                const nonce = JSON.parse(Buffer.from(headers.DPoP.split(".")[1], "base64url").toString()).nonce;
+                if (nonce === "n2") return { status: 200, headers: { "dpop-nonce": "n2" }, body: "{}" };
+                // both stale requests are in flight before either is answered
+                if (++arrived === 2) release();
+                await barrier;
+                return { status: 401, headers: { "dpop-nonce": "n2", "www-authenticate": 'DPoP error="use_dpop_nonce"' }, body: "{}" };
+            },
+        };
+        const req = { url: "https://pds.test/xrpc/x", method: "POST", headers: {}, body: "{}", accessToken: "at-1" };
+        const [a, b] = await Promise.all([dpopRequest(transport, nonces, key, req, 1000, "x"), dpopRequest(transport, nonces, key, req, 1000, "x")]);
+        assert.deepEqual([a.status, b.status], [200, 200]);
+    });
+});
+
 describe("rule 2: no credential can travel in a template or the bundle", () => {
     it("the template variables are exactly the five non-secret settings", () => {
         assert.deepEqual(TEMPLATE_VARS.map(([k]) => k), ["ACCOUNTS", "PLC_URL", "APPVIEW_URL", "POLL_MS", "ALLOW_HTTP"]);
